@@ -31,6 +31,15 @@ export const config = {
     .map((s) => s.trim())
     .filter(Boolean),
 
+  /**
+   * Opt-in login wall. Loopback-only binding keeps other machines off this
+   * API, but anyone with access to this machine or browser — a shared
+   * computer, another local account — can otherwise open the UI straight into
+   * your mailbox data. Set this to require a password; leave it unset to keep
+   * the previous no-login behaviour.
+   */
+  appPassword: process.env.APP_PASSWORD ?? "",
+
   google: {
     clientId: process.env.GOOGLE_CLIENT_ID ?? "",
     clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
