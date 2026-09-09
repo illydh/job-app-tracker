@@ -3,8 +3,9 @@ import { Board } from "./components/Board";
 import { DetailPanel } from "./components/DetailPanel";
 import { Header } from "./components/Header";
 import { Landing } from "./components/Landing";
+import { Login } from "./components/Login";
 import { SettingsPanel } from "./components/SettingsPanel";
-import { api } from "./lib/api";
+import { ApiError, api, getAuthToken, setAuthToken } from "./lib/api";
 import type { Application, Health, SyncProgress } from "./lib/types";
 
 export default function App() {
@@ -19,6 +20,8 @@ export default function App() {
   // Distinguishes "still asking the server" from "asked, and nobody is
   // connected" — without it the landing page flashes on every reload.
   const [ready, setReady] = useState(false);
+  const [authRequired, setAuthRequired] = useState(false);
+  const [authed, setAuthed] = useState(Boolean(getAuthToken()));
 
   const refresh = useCallback(async () => {
     try {
@@ -27,16 +30,46 @@ export default function App() {
       setApplications(a.applications);
       setSyncing(h.syncing);
       setHealthError(null);
+      setAuthed(true);
     } catch (err) {
-      setHealthError((err as Error).message);
-      setHealth(null);
+      if (err instanceof ApiError && err.status === 401) {
+        // The stored token was rejected — server restarted with a new
+        // password, or there never was a valid one. Back to the login screen.
+        setAuthToken(null);
+        setAuthed(false);
+        setHealth(null);
+      } else {
+        setHealthError((err as Error).message);
+        setHealth(null);
+      }
     } finally {
       setReady(true);
     }
   }, []);
 
+  const logout = useCallback(() => {
+    setAuthToken(null);
+    setAuthed(false);
+    setHealth(null);
+    setApplications([]);
+  }, []);
+
   useEffect(() => {
-    void refresh();
+    (async () => {
+      try {
+        const status = await api.authStatus();
+        setAuthRequired(status.required);
+        if (status.required && !getAuthToken()) {
+          setReady(true);
+          return;
+        }
+      } catch (err) {
+        setHealthError((err as Error).message);
+        setReady(true);
+        return;
+      }
+      void refresh();
+    })();
   }, [refresh]);
 
   // While a sync runs, poll progress; refresh the board once it finishes.
@@ -80,6 +113,10 @@ export default function App() {
   // user goes straight to their board instead of blinking through onboarding.
   if (!ready) return <div className="app" />;
 
+  if (authRequired && !authed) {
+    return <Login onSuccess={() => void refresh()} />;
+  }
+
   // No cached profile — never connected, disconnected, or the token lapsed.
   if (!health?.gmail.profile) {
     return <Landing health={health} healthError={healthError} onRefresh={refresh} />;
@@ -97,6 +134,7 @@ export default function App() {
         settingsOpen={settingsOpen}
         query={query}
         onQuery={setQuery}
+        onLogout={authRequired ? logout : undefined}
       />
 
       {settingsOpen && <SettingsPanel health={health} healthError={healthError} onSaved={refresh} />}

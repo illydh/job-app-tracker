@@ -10,6 +10,8 @@ interface Props {
   settingsOpen: boolean;
   query: string;
   onQuery: (q: string) => void;
+  /** Present only when the server has a login password configured. */
+  onLogout?: () => void;
 }
 
 function Pill({ ok, label }: { ok: boolean; label: string }) {
@@ -31,6 +33,7 @@ export function Header({
   settingsOpen,
   query,
   onQuery,
+  onLogout,
 }: Props) {
   const gmailOk = Boolean(health?.gmail.connected);
   const modelOk = Boolean(health?.ollama.reachable && health.ollama.modelAvailable);
@@ -62,6 +65,11 @@ export function Header({
           <button className="btn" onClick={onToggleSettings} aria-expanded={settingsOpen}>
             Setup
           </button>
+          {onLogout && (
+            <button className="btn btn-quiet" onClick={onLogout}>
+              Log out
+            </button>
+          )}
         </div>
       </div>
 

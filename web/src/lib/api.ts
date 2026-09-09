@@ -23,14 +23,53 @@ export function setApiBase(base: string): void {
   }
 }
 
+const TOKEN_KEY = "jat.authToken";
+
+/**
+ * A bearer token rather than a cookie: the UI and API are on different
+ * origins even in the everyday case (localhost:5173 calling localhost:4000),
+ * so a cookie would need SameSite=None, which browsers refuse to send back to
+ * a plain http:// origin. A header sidesteps that entirely.
+ */
+export function getAuthToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setAuthToken(token: string | null): void {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* private browsing — the session just won't persist across reloads */
+  }
+}
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+  ) {
+    super(message);
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getAuthToken();
   const res = await fetch(`${getApiBase()}/api${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...init?.headers,
+    },
   });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((detail as { error?: string }).error ?? `HTTP ${res.status}`);
+    throw new ApiError((detail as { error?: string }).error ?? `HTTP ${res.status}`, res.status);
   }
   return res.json() as Promise<T>;
 }
@@ -57,5 +96,14 @@ export const api = {
       body: JSON.stringify({ otherId }),
     }),
   disconnect: () => request<{ connected: boolean }>("/auth/disconnect", { method: "POST" }),
-  authUrl: () => `${getApiBase()}/api/auth/start`,
+  authStatus: () => request<{ required: boolean }>("/auth/status"),
+  login: (password: string) =>
+    request<{ token: string }>("/auth/login", { method: "POST", body: JSON.stringify({ password }) }),
+  authUrl: () => {
+    // window.open() navigates the browser directly, so it can't carry an
+    // Authorization header — the token rides along as a query param instead.
+    const token = getAuthToken();
+    const url = `${getApiBase()}/api/auth/start`;
+    return token ? `${url}?token=${encodeURIComponent(token)}` : url;
+  },
 };
