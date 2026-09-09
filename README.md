@@ -1,11 +1,19 @@
 # Job Application Tracker
 
-Reads your Gmail, uses a **local** LLM to spot job-application emails, and tracks
-each application through its interview stage on a simple board.
+A self-hosted tool that reads your Gmail, uses a **local** LLM to identify
+job-application emails, and tracks each application through its interview
+stage on a simple board.
 
-Nothing leaves your machine. Email is fetched read-only, classified by Ollama on
-localhost, and stored in a local SQLite file. The only thing published is the
-static UI.
+It is built to run entirely on your machine: email is fetched read-only,
+classified by Ollama on localhost, and stored in a local SQLite file. Nothing
+is sent to a third-party server. If you deploy the UI to GitHub Pages, that
+static page is the only piece that leaves your machine — it still talks to
+your local API and database, as described [below](#a-note-on-github-pages).
+
+This is a personal, MVP-stage project rather than a polished product. It
+requires a Gmail OAuth client and a running Ollama instance to be useful — see
+[Setup](#setup) below before deciding if it's worth the install. Known gaps
+are listed under [Not in the MVP](#not-in-the-mvp).
 
 ---
 
