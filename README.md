@@ -260,6 +260,25 @@ only syncing needs it.
 - To revoke access entirely: **Setup → Disconnect**, then remove the app at
   [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
 
+### Login wall
+
+By default the UI opens straight to your board — fine on a single-user
+machine, less fine on one you share. Set `APP_PASSWORD` in `server/.env` to
+require a password before any application data is served:
+
+```
+APP_PASSWORD=choose-something-only-you-know
+```
+
+Restart the server and the UI will show a lock screen until the right
+password is entered. The browser then remembers a token in `localStorage`, so
+you are not re-prompted on every visit; changing `APP_PASSWORD` invalidates
+that token everywhere. Leave it blank to keep the previous no-login behaviour.
+
+This protects the UI and API from anyone else with access to this machine or
+browser — it is not a substitute for the loopback binding (`HOST=127.0.0.1`),
+which is what keeps the API off your network in the first place.
+
 ---
 
 ## Not in the MVP
