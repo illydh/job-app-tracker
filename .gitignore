@@ -6,21 +6,22 @@ __pycache__/
 # C extensions
 *.so
 
-# Distribution / packaging
+# Distribution / packaging (root-anchored: bare `lib/` etc. would match
+# source directories like server/src/lib)
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
+/build/
+/develop-eggs/
+/dist/
+/downloads/
+/eggs/
+/.eggs/
+/lib/
+/lib64/
+/parts/
+/sdist/
+/var/
+/wheels/
+/share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -216,3 +217,20 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ── Node / project ───────────────────────────────────────────────────────────
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Secrets and personal data — never commit these.
+# Google's downloaded OAuth client file; its values belong in server/.env.
+client_secret*.json
+.env
+.env.local
+server/.env
+server/data/
+*.db
+*.db-wal
+*.db-shm
+token.json
