@@ -22,6 +22,7 @@ import {
   type GmailProfile,
 } from "../lib/gmail.ts";
 import { health as ollamaHealth } from "../lib/ollama.ts";
+import { authRequired, isValidToken, issueToken } from "../lib/session.ts";
 import { findDuplicates } from "../lib/similarity.ts";
 import { daysSince, deriveStage } from "../lib/stage.ts";
 import { isSyncing, runSync, syncProgress } from "../lib/sync.ts";
@@ -40,6 +41,40 @@ function asyncRoute(fn: (req: Request, res: Response) => Promise<void>) {
     void fn(req, res).catch(next);
   };
 }
+
+/* -------------------------------------------------------------- auth gate --- */
+
+/**
+ * Paths reachable without a token. `/auth/login` and `/auth/status` bootstrap
+ * the login screen itself; `/auth/callback` is Google redirecting the user's
+ * browser back with a `code` — that request cannot carry our bearer token, and
+ * doesn't need to, since it's already gated by completing Google's own consent
+ * screen.
+ */
+const PUBLIC_PATHS = new Set(["/auth/login", "/auth/status", "/auth/callback"]);
+
+api.use((req, res, next) => {
+  if (!authRequired() || PUBLIC_PATHS.has(req.path)) {
+    next();
+    return;
+  }
+
+  // A top-level `window.open()` navigation (used to kick off Gmail consent)
+  // cannot set an Authorization header, so this one route also accepts the
+  // token as a query param.
+  if (req.path === "/auth/start" && isValidToken(typeof req.query.token === "string" ? req.query.token : null)) {
+    next();
+    return;
+  }
+
+  const header = req.header("authorization") ?? "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (isValidToken(token)) {
+    next();
+    return;
+  }
+  res.status(401).json({ error: "Not authenticated" });
+});
 
 /* --------------------------------------------------------------- profile --- */
 
@@ -150,6 +185,37 @@ api.get(
 );
 
 /* ------------------------------------------------------------------ auth --- */
+
+/** Lets the UI know, before it has a token, whether it needs to show a login screen. */
+api.get("/auth/status", (_req, res) => {
+  res.json({ required: authRequired() });
+});
+
+const LoginSchema = z.object({ password: z.string().min(1) });
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+api.post(
+  "/auth/login",
+  asyncRoute(async (req, res) => {
+    const parsed = LoginSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Password is required" });
+      return;
+    }
+    const token = issueToken(parsed.data.password);
+    if (!token) {
+      // A small fixed delay blunts naive password-guessing scripts without
+      // the bookkeeping a real rate limiter would need for a single-user app.
+      await sleep(400);
+      res.status(401).json({ error: "Incorrect password" });
+      return;
+    }
+    res.json({ token });
+  }),
+);
 
 api.get("/auth/start", (_req, res) => {
   try {

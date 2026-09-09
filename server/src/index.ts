@@ -4,6 +4,7 @@ import { config } from "./lib/config.ts";
 import { hasToken } from "./lib/gmail.ts";
 import { health } from "./lib/ollama.ts";
 import { startPeriodicSync } from "./lib/scheduler.ts";
+import { authRequired } from "./lib/session.ts";
 import { api } from "./routes/api.ts";
 
 const app = express();
@@ -45,6 +46,7 @@ app.listen(config.port, config.host, async () => {
     }`,
   );
   console.log(`  Window   emails since ${config.syncSince}`);
+  console.log(`  Login    ${authRequired() ? "password required" : "disabled — set APP_PASSWORD in server/.env to require one"}`);
   startPeriodicSync();
   console.log();
 });
