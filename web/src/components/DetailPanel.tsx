@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { STAGE_LABELS, STATUSES, type AppEvent, type Application, type Status } from "../lib/types";
+import { DuplicateSuggestions } from "./DuplicateSuggestions";
 
 interface Props {
   app: Application;
@@ -13,6 +14,9 @@ export function DetailPanel({ app, onClose, onChanged }: Props) {
   const [notes, setNotes] = useState(app.notes ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A merge moves events onto this application without changing its id, so the
+  // timeline has to be told to reload explicitly.
+  const [reload, setReload] = useState(0);
 
   useEffect(() => {
     setNotes(app.notes ?? "");
@@ -24,7 +28,12 @@ export function DetailPanel({ app, onClose, onChanged }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [app.id, app.notes]);
+  }, [app.id, app.notes, reload]);
+
+  const afterMerge = useCallback(() => {
+    setReload((n) => n + 1);
+    onChanged();
+  }, [onChanged]);
 
   async function act(fn: () => Promise<unknown>) {
     setSaving(true);
@@ -50,6 +59,8 @@ export function DetailPanel({ app, onClose, onChanged }: Props) {
           ×
         </button>
       </div>
+
+      <DuplicateSuggestions appId={app.id} onMerged={afterMerge} />
 
       <div className="detail-section">
         <label htmlFor="stage-select">Stage</label>
