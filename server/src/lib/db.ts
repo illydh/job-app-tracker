@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.ts";
-import type { ApplicationRow, EventRow, GmailMessage, Status } from "./types.ts";
+import { STATUS_RANK, type ApplicationRow, type EventRow, type GmailMessage, type Status } from "./types.ts";
 
 fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
 
@@ -57,6 +57,27 @@ CREATE TABLE IF NOT EXISTS events (
   UNIQUE(application_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_events_app ON events(application_id, occurred_at DESC);
+
+-- Pairs the user has explicitly ruled out as duplicates. Keyed by row id and
+-- cascaded, so a merge or a delete retires the decision along with the row.
+CREATE TABLE IF NOT EXISTS merge_dismissals (
+  app_a      INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+  app_b      INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (app_a, app_b)
+);
+
+-- Cached duplicate verdicts, keyed by the *content* of both sides rather than
+-- their ids. Asking the model costs seconds, and the same two names are compared
+-- again on every click; keying by content means a verdict survives a merge and
+-- is recomputed by itself once either name changes.
+CREATE TABLE IF NOT EXISTS similarity_verdicts (
+  pair_key   TEXT PRIMARY KEY,
+  similar    INTEGER NOT NULL,
+  score      REAL NOT NULL,
+  reason     TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
@@ -247,6 +268,10 @@ export function upsertApplicationEvent(input: UpsertInput): number {
   return tx();
 }
 
+export function getApplication(id: number): ApplicationRow | undefined {
+  return db.prepare(`SELECT * FROM applications WHERE id = ?`).get(id) as ApplicationRow | undefined;
+}
+
 export function listApplications(): ApplicationRow[] {
   return db
     .prepare(`SELECT * FROM applications ORDER BY last_event_at DESC`)
@@ -267,16 +292,168 @@ export function listEvents(applicationId: number): EventRow[] {
 
 export function setStatus(id: number, status: Status): ApplicationRow | undefined {
   db.prepare(`UPDATE applications SET status = ?, status_source = 'manual' WHERE id = ?`).run(status, id);
-  return db.prepare(`SELECT * FROM applications WHERE id = ?`).get(id) as ApplicationRow | undefined;
+  return getApplication(id);
 }
 
 export function setNotes(id: number, notes: string): ApplicationRow | undefined {
   db.prepare(`UPDATE applications SET notes = ? WHERE id = ?`).run(notes, id);
-  return db.prepare(`SELECT * FROM applications WHERE id = ?`).get(id) as ApplicationRow | undefined;
+  return getApplication(id);
 }
 
 export function deleteApplication(id: number): boolean {
   return db.prepare(`DELETE FROM applications WHERE id = ?`).run(id).changes > 0;
+}
+
+/* --------------------------------------------------------- de-duplication --- */
+
+/** Order-independent pair id, so (a,b) and (b,a) address the same row. */
+function orderedPair(a: number, b: number): [number, number] {
+  return a < b ? [a, b] : [b, a];
+}
+
+/** Record "these two are not the same application", permanently. */
+export function dismissPair(a: number, b: number): void {
+  const [lo, hi] = orderedPair(a, b);
+  db.prepare(
+    `INSERT INTO merge_dismissals (app_a, app_b, created_at) VALUES (?, ?, ?)
+     ON CONFLICT(app_a, app_b) DO NOTHING`,
+  ).run(lo, hi, Date.now());
+}
+
+/** Every application already ruled out as a duplicate of `id`. */
+export function dismissedFor(id: number): Set<number> {
+  const rows = db
+    .prepare(`SELECT app_a, app_b FROM merge_dismissals WHERE app_a = ? OR app_b = ?`)
+    .all(id, id) as { app_a: number; app_b: number }[];
+  return new Set(rows.map((r) => (r.app_a === id ? r.app_b : r.app_a)));
+}
+
+export interface Verdict {
+  similar: boolean;
+  score: number;
+  reason: string;
+}
+
+export function getVerdict(pairKey: string): Verdict | null {
+  const row = db.prepare(`SELECT similar, score, reason FROM similarity_verdicts WHERE pair_key = ?`).get(pairKey) as
+    | { similar: number; score: number; reason: string }
+    | undefined;
+  return row ? { similar: row.similar === 1, score: row.score, reason: row.reason } : null;
+}
+
+export function putVerdict(pairKey: string, v: Verdict): void {
+  db.prepare(
+    `INSERT INTO similarity_verdicts (pair_key, similar, score, reason, created_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(pair_key) DO UPDATE SET
+       similar = excluded.similar, score = excluded.score, reason = excluded.reason, created_at = excluded.created_at`,
+  ).run(pairKey, v.similar ? 1 : 0, v.score, v.reason, Date.now());
+}
+
+export interface AppSignals {
+  /** Gmail threads this application's emails came from. */
+  threads: Set<string>;
+  /** Sending domains, minus shared ATS and consumer mail hosts. */
+  domains: Set<string>;
+}
+
+/**
+ * Domains that say nothing about *which* employer sent an email: every company
+ * using Greenhouse mails from the same host, so treating these as identity
+ * evidence would make every ATS-driven application look like every other.
+ */
+const GENERIC_DOMAINS =
+  /(^|\.)(greenhouse|greenhouse-mail|lever|hire\.lever|ashbyhq|myworkday|workday|icims|smartrecruiters|taleo|jobvite|breezy|breezy-?hr|workable|recruitee|bamboohr|successfactors|oraclecloud|paylocity|dayforce|jazzhr|teamtailor|rippling|gmail|googlemail|outlook|hotmail|yahoo|icloud|proton|protonmail)\./;
+
+/** Thread ids and sender domains behind every application, in a single pass. */
+export function applicationSignals(): Map<number, AppSignals> {
+  const rows = db
+    .prepare(
+      `SELECT e.application_id AS id, m.thread_id AS threadId, m.from_addr AS fromAddr
+         FROM events e JOIN messages m ON m.id = e.message_id`,
+    )
+    .all() as { id: number; threadId: string; fromAddr: string }[];
+
+  const out = new Map<number, AppSignals>();
+  for (const r of rows) {
+    let entry = out.get(r.id);
+    if (!entry) out.set(r.id, (entry = { threads: new Set(), domains: new Set() }));
+    if (r.threadId) entry.threads.add(r.threadId);
+
+    const domain = r.fromAddr.split("@")[1]?.toLowerCase().replace(/[>\s]/g, "");
+    if (domain && !GENERIC_DOMAINS.test(`${domain}.`)) entry.domains.add(domain);
+  }
+  return out;
+}
+
+/** Newest event on an application, ties broken by how far along the stage is. */
+function latestEvent(applicationId: number): EventRow | undefined {
+  const rows = db.prepare(`SELECT * FROM events WHERE application_id = ?`).all(applicationId) as EventRow[];
+  return rows.sort((a, b) => b.occurred_at - a.occurred_at || STATUS_RANK[b.status] - STATUS_RANK[a.status])[0];
+}
+
+/**
+ * Fold `sourceId` into `targetId`, then delete the source.
+ *
+ * The target survives so the UI keeps its selection; everything else is a union.
+ * Every event moves across, the window widens to cover both, and the source's
+ * role or hand-set status is adopted only where the target has none of its own —
+ * a merge should never lose information the user could not recover.
+ */
+export function mergeApplications(targetId: number, sourceId: number): ApplicationRow | undefined {
+  if (targetId === sourceId) return getApplication(targetId);
+
+  const tx = db.transaction((): ApplicationRow | undefined => {
+    const target = getApplication(targetId);
+    const source = getApplication(sourceId);
+    if (!target || !source) return undefined;
+
+    // One email can already be recorded against both rows. OR IGNORE leaves that
+    // duplicate behind on the source, where deleting the source cascades it away.
+    db.prepare(`UPDATE OR IGNORE events SET application_id = ? WHERE application_id = ?`).run(targetId, sourceId);
+    db.prepare(`DELETE FROM applications WHERE id = ?`).run(sourceId);
+
+    // Adopting a role rewrites role_key, which is half of a UNIQUE constraint —
+    // so only when the target has no role of its own and no third row holds the
+    // pair already. Checked after the delete, when the source no longer counts.
+    const taken = db
+      .prepare(`SELECT 1 FROM applications WHERE company_key = ? AND role_key = ? AND id != ?`)
+      .get(target.company_key, source.role_key, targetId);
+    const adoptsRole = target.role_key === "" && source.role_key !== "" && !taken;
+
+    const manual =
+      target.status_source === "manual" ? target : source.status_source === "manual" ? source : null;
+    const latest = latestEvent(targetId);
+
+    const notes = [target.notes, source.notes].filter((n) => n?.trim()).join("\n\n") || null;
+
+    db.prepare(
+      `UPDATE applications
+          SET role          = ?,
+              role_key      = ?,
+              status        = ?,
+              status_source = ?,
+              confidence    = ?,
+              first_seen_at = MIN(first_seen_at, ?),
+              last_event_at = MAX(last_event_at, ?),
+              notes         = ?
+        WHERE id = ?`,
+    ).run(
+      adoptsRole ? source.role : target.role,
+      adoptsRole ? source.role_key : target.role_key,
+      manual ? manual.status : (latest?.status ?? target.status),
+      manual ? "manual" : "model",
+      manual ? manual.confidence : (latest?.confidence ?? target.confidence),
+      source.first_seen_at,
+      source.last_event_at,
+      notes,
+      targetId,
+    );
+
+    return getApplication(targetId);
+  });
+
+  return tx();
 }
 
 /* -------------------------------------------------------------- metadata --- */
