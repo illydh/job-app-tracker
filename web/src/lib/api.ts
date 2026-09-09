@@ -1,4 +1,4 @@
-import type { Application, AppEvent, Health, Status, SyncProgress } from "./types";
+import type { Application, AppEvent, Health, SimilarCandidate, Status, SyncProgress } from "./types";
 
 const STORAGE_KEY = "jat.apiBase";
 const DEFAULT_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:4000";
@@ -46,6 +46,16 @@ export const api = {
   setNotes: (id: number, notes: string) =>
     request<unknown>(`/applications/${id}`, { method: "PATCH", body: JSON.stringify({ notes }) }),
   remove: (id: number) => request<{ deleted: boolean }>(`/applications/${id}`, { method: "DELETE" }),
+  similar: (id: number, signal?: AbortSignal) =>
+    request<{ candidates: SimilarCandidate[] }>(`/applications/${id}/similar`, { signal }),
+  /** Folds `otherId` into `id`; `id` survives, so the UI keeps its selection. */
+  merge: (id: number, otherId: number) =>
+    request<unknown>(`/applications/${id}/merge`, { method: "POST", body: JSON.stringify({ otherId }) }),
+  dismissSimilar: (id: number, otherId: number) =>
+    request<{ dismissed: boolean }>(`/applications/${id}/dismiss-similar`, {
+      method: "POST",
+      body: JSON.stringify({ otherId }),
+    }),
   disconnect: () => request<{ connected: boolean }>("/auth/disconnect", { method: "POST" }),
   authUrl: () => `${getApiBase()}/api/auth/start`,
 };
