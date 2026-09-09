@@ -1,6 +1,6 @@
 import { config } from "./config.ts";
 import * as store from "./db.ts";
-import { authorizedClient, fetchMessages, isAuthError, listMessageIds, noteAuthError } from "./gmail.ts";
+import { authorizedClient, effectiveSyncSince, fetchMessages, isAuthError, listMessageIds, noteAuthError } from "./gmail.ts";
 import { classify, health } from "./ollama.ts";
 import { prefilter } from "./prefilter.ts";
 
@@ -76,8 +76,10 @@ export async function runSync(): Promise<SyncProgress> {
     }
 
     /* ------------------------------------------------- fetch new messages --- */
-    progress.message = `Listing messages since ${config.syncSince}…`;
-    const ids = await listMessageIds(client, config.maxMessagesPerSync);
+    const lastSyncAt = store.getMeta("last_sync_at");
+    const since = effectiveSyncSince(lastSyncAt ? Number(lastSyncAt) : null);
+    progress.message = `Listing messages since ${since}…`;
+    const ids = await listMessageIds(client, config.maxMessagesPerSync, since);
     const known = store.knownMessageIds(ids);
     const fresh = ids.filter((id) => !known.has(id));
 
