@@ -144,7 +144,22 @@ function extractJson(raw: string): string {
   return withoutThinking.slice(start, end + 1);
 }
 
-export async function classify(msg: GmailMessage): Promise<Classification> {
+/**
+ * Shared by every caller, deliberately: Ollama keeps a model resident against
+ * one context size and reloads it — several seconds — whenever a request asks
+ * for a different one, so two callers with two window sizes would thrash the
+ * model in and out on every alternation. Covers the system prompt plus a
+ * trimmed email with room to spare.
+ */
+const NUM_CTX = 4096;
+
+/** One schema-constrained, deterministic exchange with the local model. */
+async function chatJson(
+  system: string,
+  user: string,
+  schema: unknown,
+  opts: { timeoutMs: number; signal?: AbortSignal },
+): Promise<unknown> {
   // `think` is only meaningful — and only accepted — on capable models.
   const canThink = await supportsThinking();
   const think = canThink ? (config.ollama.think ?? false) : undefined;
@@ -155,18 +170,19 @@ export async function classify(msg: GmailMessage): Promise<Classification> {
     body: JSON.stringify({
       model: config.ollama.model,
       stream: false,
-      format: RESPONSE_SCHEMA,
-      // Deterministic: this is extraction, not writing. num_ctx covers the
-      // system prompt plus a trimmed email with room to spare.
-      options: { temperature: 0, num_ctx: 4096 },
+      format: schema,
+      // Deterministic: this is extraction, not writing.
+      options: { temperature: 0, num_ctx: NUM_CTX },
       // Omitted entirely when undefined — JSON.stringify drops undefined.
       think,
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: buildUserPrompt(msg) },
+        { role: "system", content: system },
+        { role: "user", content: user },
       ],
     }),
-    signal: AbortSignal.timeout(config.ollama.timeoutMs),
+    signal: opts.signal
+      ? AbortSignal.any([AbortSignal.timeout(opts.timeoutMs), opts.signal])
+      : AbortSignal.timeout(opts.timeoutMs),
   });
 
   if (!res.ok) {
@@ -177,7 +193,15 @@ export async function classify(msg: GmailMessage): Promise<Classification> {
   const raw = payload.message?.content?.trim() ?? "";
   if (!raw) throw new Error("Ollama returned an empty response");
 
-  const parsed = ResponseSchema.safeParse(JSON.parse(extractJson(raw)));
+  return JSON.parse(extractJson(raw));
+}
+
+export async function classify(msg: GmailMessage): Promise<Classification> {
+  const parsed = ResponseSchema.safeParse(
+    await chatJson(SYSTEM_PROMPT, buildUserPrompt(msg), RESPONSE_SCHEMA, {
+      timeoutMs: config.ollama.timeoutMs,
+    }),
+  );
   if (!parsed.success) {
     throw new Error(`Ollama response failed validation: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
   }
@@ -198,5 +222,79 @@ export async function classify(msg: GmailMessage): Promise<Classification> {
     status,
     confidence: Math.max(0, Math.min(1, d.confidence)),
     summary: d.summary.trim(),
+  };
+}
+
+/* ------------------------------------------------------ duplicate judging --- */
+
+const DUPLICATE_SCHEMA = {
+  type: "object",
+  properties: {
+    same_application: { type: "boolean" },
+    confidence: { type: "number" },
+    reason: { type: "string" },
+  },
+  required: ["same_application", "confidence", "reason"],
+} as const;
+
+const DuplicateSchema = z.object({
+  same_application: z.boolean(),
+  confidence: z.number(),
+  reason: z.string(),
+});
+
+const DUPLICATE_PROMPT = `You de-duplicate a personal job-application tracker.
+
+You will be given two tracked entries, each an employer and a job title. Decide whether they are ONE application recorded twice under slightly different names.
+
+same_application = true when BOTH hold:
+- the employers are the same organisation — including a former name, an abbreviation, a subsidiary written as its parent, or extra words like "Careers", "Recruiting", "Talent Team"
+- the titles name the same position — including level suffixes (II, III, Senior), department or location decoration, requisition numbers, and common abbreviations (SWE = Software Engineer, PM = Product Manager, SRE = Site Reliability Engineer)
+
+same_application = false when the employers are different organisations, or when the titles are genuinely different jobs at the same employer (Backend Engineer vs Frontend Engineer, Engineer vs Engineering Manager, Intern vs full-time).
+
+A missing title ("(none)") does not by itself make two entries different: if the employer matches and nothing contradicts it, they are probably the same application.
+
+confidence: 0.0-1.0 in your verdict. reason: one short clause, no more than 12 words.
+
+Return JSON only.`;
+
+export interface DuplicateVerdict {
+  same: boolean;
+  confidence: number;
+  reason: string;
+}
+
+/**
+ * Ask the model whether two tracked entries are the same application.
+ *
+ * Deliberately given only the two names, not their emails: the caller has
+ * already established that the surrounding evidence is compatible, and the open
+ * question is purely one of naming — which is short, cheap, and cacheable.
+ */
+export async function judgeDuplicate(
+  a: { company: string; role: string | null },
+  b: { company: string; role: string | null },
+  signal?: AbortSignal,
+): Promise<DuplicateVerdict> {
+  const describe = (x: { company: string; role: string | null }) =>
+    `employer: ${x.company}\ntitle: ${x.role?.trim() || "(none)"}`;
+
+  const parsed = DuplicateSchema.safeParse(
+    await chatJson(DUPLICATE_PROMPT, `Entry A\n${describe(a)}\n\nEntry B\n${describe(b)}`, DUPLICATE_SCHEMA, {
+      // Someone is waiting on this, unlike a sync. Give up early rather than
+      // holding a request open for two minutes.
+      timeoutMs: Math.min(config.ollama.timeoutMs, 30_000),
+      signal,
+    }),
+  );
+  if (!parsed.success) {
+    throw new Error(`Ollama duplicate check failed validation: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
+  }
+
+  return {
+    same: parsed.data.same_application,
+    confidence: Math.max(0, Math.min(1, parsed.data.confidence)),
+    reason: parsed.data.reason.trim(),
   };
 }
