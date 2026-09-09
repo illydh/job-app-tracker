@@ -32,6 +32,18 @@ export interface Application {
   latestSummary: string | null;
 }
 
+/** Another application the server thinks is the same one recorded twice. */
+export interface SimilarCandidate {
+  id: number;
+  company: string;
+  role: string | null;
+  eventCount: number;
+  lastEventAt: number;
+  score: number;
+  reason: string;
+  basis: "thread" | "lexical" | "model";
+}
+
 export interface AppEvent {
   id: number;
   status: Status;
