@@ -22,6 +22,7 @@ import {
   type GmailProfile,
 } from "../lib/gmail.ts";
 import { health as ollamaHealth } from "../lib/ollama.ts";
+import { findDuplicates } from "../lib/similarity.ts";
 import { daysSince, deriveStage } from "../lib/stage.ts";
 import { isSyncing, runSync, syncProgress } from "../lib/sync.ts";
 import { STATUSES } from "../lib/types.ts";
@@ -322,4 +323,87 @@ api.delete("/applications/:id", (req, res) => {
     return;
   }
   res.json({ deleted: store.deleteApplication(id) });
+});
+
+/* ------------------------------------------------------------ duplicates --- */
+
+/** Shared by the three duplicate routes; `null` means a response was sent. */
+function applicationId(req: Request, res: Response): number | null {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: "Invalid id" });
+    return null;
+  }
+  return id;
+}
+
+const PairSchema = z.object({ otherId: z.number().int() });
+
+function otherId(req: Request, res: Response): number | null {
+  const parsed = PairSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Expected a numeric otherId" });
+    return null;
+  }
+  return parsed.data.otherId;
+}
+
+/**
+ * Applications that look like duplicates of this one.
+ *
+ * Read-only and safe to call on every selection: results the user has already
+ * rejected are filtered server-side, and model verdicts are cached, so a second
+ * look at the same card costs one query.
+ */
+api.get(
+  "/applications/:id/similar",
+  asyncRoute(async (req, res) => {
+    const id = applicationId(req, res);
+    if (id === null) return;
+
+    // Clicking through the board cancels the previous fetch. Asking the model
+    // costs seconds each, so give up as soon as nobody is listening.
+    const abort = new AbortController();
+    res.on("close", () => abort.abort());
+
+    const candidates = await findDuplicates(id, abort.signal);
+    // `close` also fires on a normal send, but only after this line has run —
+    // so an abort seen here means the client really did hang up.
+    if (!abort.signal.aborted) res.json({ candidates });
+  }),
+);
+
+/** Fold another application into this one; this one survives. */
+api.post("/applications/:id/merge", (req, res) => {
+  const id = applicationId(req, res);
+  if (id === null) return;
+  const source = otherId(req, res);
+  if (source === null) return;
+
+  if (source === id) {
+    res.status(400).json({ error: "An application cannot be merged into itself" });
+    return;
+  }
+
+  const row = store.mergeApplications(id, source);
+  if (!row) {
+    res.status(404).json({ error: "Application not found" });
+    return;
+  }
+  res.json({ application: { ...row, stage: deriveStage(row) } });
+});
+
+/** Remember that these two are different, so the suggestion never returns. */
+api.post("/applications/:id/dismiss-similar", (req, res) => {
+  const id = applicationId(req, res);
+  if (id === null) return;
+  const other = otherId(req, res);
+  if (other === null) return;
+
+  if (!store.getApplication(id) || !store.getApplication(other)) {
+    res.status(404).json({ error: "Application not found" });
+    return;
+  }
+  store.dismissPair(id, other);
+  res.json({ dismissed: true });
 });
