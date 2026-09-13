@@ -1,96 +1,138 @@
-import Database from "better-sqlite3";
+import { createClient, type Client, type InArgs, type InStatement, type ResultSet, type Transaction } from "@libsql/client";
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.ts";
 import { STATUS_RANK, type ApplicationRow, type EventRow, type GmailMessage, type Status } from "./types.ts";
 
-fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
+if (config.database.url.startsWith("file:")) {
+  fs.mkdirSync(path.dirname(config.database.localPath), { recursive: true });
+}
 
-export const db = new Database(config.dbPath);
-db.pragma("journal_mode = WAL");
-db.pragma("foreign_keys = ON");
+export const db = createClient({
+  url: config.database.url,
+  authToken: config.database.authToken,
+  intMode: "number",
+  timeout: 5_000,
+});
 
-db.exec(`
-CREATE TABLE IF NOT EXISTS messages (
-  id            TEXT PRIMARY KEY,
-  thread_id     TEXT NOT NULL,
-  from_addr     TEXT NOT NULL DEFAULT '',
-  from_name     TEXT NOT NULL DEFAULT '',
-  subject       TEXT NOT NULL DEFAULT '',
-  snippet       TEXT NOT NULL DEFAULT '',
-  body          TEXT NOT NULL DEFAULT '',
-  internal_date INTEGER NOT NULL,
-  -- 'pending' -> seen but not yet classified
-  -- 'prefiltered' -> cheaply rejected, never sent to the model
-  -- 'classified' -> model ran; see is_job_related
-  state         TEXT NOT NULL DEFAULT 'pending',
-  is_job_related INTEGER,
-  processed_at  INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_messages_state ON messages(state);
-CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(internal_date DESC);
+const SCHEMA: InStatement[] = [
+  `CREATE TABLE IF NOT EXISTS messages (
+    id             TEXT PRIMARY KEY,
+    thread_id      TEXT NOT NULL,
+    from_addr      TEXT NOT NULL DEFAULT '',
+    from_name      TEXT NOT NULL DEFAULT '',
+    subject        TEXT NOT NULL DEFAULT '',
+    snippet        TEXT NOT NULL DEFAULT '',
+    body           TEXT NOT NULL DEFAULT '',
+    internal_date  INTEGER NOT NULL,
+    state          TEXT NOT NULL DEFAULT 'pending',
+    is_job_related INTEGER,
+    processed_at   INTEGER
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_state ON messages(state)`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(internal_date DESC)`,
+  `CREATE TABLE IF NOT EXISTS applications (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    company       TEXT NOT NULL,
+    company_key   TEXT NOT NULL,
+    role          TEXT,
+    role_key      TEXT NOT NULL DEFAULT '',
+    status        TEXT NOT NULL,
+    status_source TEXT NOT NULL DEFAULT 'model',
+    confidence    REAL NOT NULL DEFAULT 0,
+    first_seen_at INTEGER NOT NULL,
+    last_event_at INTEGER NOT NULL,
+    notes         TEXT,
+    UNIQUE(company_key, role_key)
+  )`,
+  `CREATE TABLE IF NOT EXISTS events (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    message_id     TEXT NOT NULL,
+    status         TEXT NOT NULL,
+    confidence     REAL NOT NULL DEFAULT 0,
+    summary        TEXT NOT NULL DEFAULT '',
+    occurred_at    INTEGER NOT NULL,
+    created_at     INTEGER NOT NULL,
+    UNIQUE(application_id, message_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_events_app ON events(application_id, occurred_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS merge_dismissals (
+    app_a      INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    app_b      INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (app_a, app_b)
+  )`,
+  `CREATE TABLE IF NOT EXISTS similarity_verdicts (
+    pair_key   TEXT PRIMARY KEY,
+    similar    INTEGER NOT NULL,
+    score      REAL NOT NULL,
+    reason     TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS oauth_credentials (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    encrypted_token TEXT NOT NULL,
+    updated_at      INTEGER NOT NULL
+  )`,
+];
 
-CREATE TABLE IF NOT EXISTS applications (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  company       TEXT NOT NULL,
-  company_key   TEXT NOT NULL,
-  role          TEXT,
-  role_key      TEXT NOT NULL DEFAULT '',
-  status        TEXT NOT NULL,
-  status_source TEXT NOT NULL DEFAULT 'model',
-  confidence    REAL NOT NULL DEFAULT 0,
-  first_seen_at INTEGER NOT NULL,
-  last_event_at INTEGER NOT NULL,
-  notes         TEXT,
-  UNIQUE(company_key, role_key)
-);
+let initialization: Promise<void> | null = null;
 
-CREATE TABLE IF NOT EXISTS events (
-  id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
-  message_id     TEXT NOT NULL,
-  status         TEXT NOT NULL,
-  confidence     REAL NOT NULL DEFAULT 0,
-  summary        TEXT NOT NULL DEFAULT '',
-  occurred_at    INTEGER NOT NULL,
-  created_at     INTEGER NOT NULL,
-  UNIQUE(application_id, message_id)
-);
-CREATE INDEX IF NOT EXISTS idx_events_app ON events(application_id, occurred_at DESC);
+/** Create missing tables before any request, scheduler tick, or CLI operation. */
+export function initializeDatabase(): Promise<void> {
+  initialization ??= (async () => {
+    if (process.env.RENDER === "true" && config.database.url.startsWith("file:")) {
+      throw new Error("TURSO_DATABASE_URL is required on Render; its local filesystem is not persistent.");
+    }
+    if (config.database.url.startsWith("libsql:") && !config.database.authToken) {
+      throw new Error("TURSO_AUTH_TOKEN is required for a remote Turso database.");
+    }
+    await db.batch(SCHEMA, "write");
+  })();
+  return initialization;
+}
 
--- Pairs the user has explicitly ruled out as duplicates. Keyed by row id and
--- cascaded, so a merge or a delete retires the decision along with the row.
-CREATE TABLE IF NOT EXISTS merge_dismissals (
-  app_a      INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
-  app_b      INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
-  created_at INTEGER NOT NULL,
-  PRIMARY KEY (app_a, app_b)
-);
+export function closeDatabase(): void {
+  db.close();
+}
 
--- Cached duplicate verdicts, keyed by the *content* of both sides rather than
--- their ids. Asking the model costs seconds, and the same two names are compared
--- again on every click; keying by content means a verdict survives a merge and
--- is recomputed by itself once either name changes.
-CREATE TABLE IF NOT EXISTS similarity_verdicts (
-  pair_key   TEXT PRIMARY KEY,
-  similar    INTEGER NOT NULL,
-  score      REAL NOT NULL,
-  reason     TEXT NOT NULL DEFAULT '',
-  created_at INTEGER NOT NULL
-);
+type Executor = {
+  execute(statement: InStatement): Promise<ResultSet>;
+};
 
-CREATE TABLE IF NOT EXISTS meta (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-`);
+function execute(executor: Executor, sql: string, args: InArgs = []): Promise<ResultSet> {
+  return executor.execute({ sql, args });
+}
+
+function first<T>(result: ResultSet): T | undefined {
+  return result.rows[0] as unknown as T | undefined;
+}
+
+function rows<T>(result: ResultSet): T[] {
+  return result.rows as unknown as T[];
+}
+
+async function writeTransaction<T>(work: (tx: Transaction) => Promise<T>): Promise<T> {
+  const tx = await db.transaction("write");
+  try {
+    const result = await work(tx);
+    await tx.commit();
+    return result;
+  } catch (error) {
+    if (!tx.closed) await tx.rollback();
+    throw error;
+  } finally {
+    tx.close();
+  }
+}
 
 /* ------------------------------------------------------------------ keys --- */
 
-/**
- * Collapse a company name to a stable identity key so "Acme, Inc." and "Acme"
- * land on the same application rather than creating duplicates.
- */
 export function companyKey(name: string): string {
   return name
     .toLowerCase()
@@ -101,7 +143,6 @@ export function companyKey(name: string): string {
     .replace(/\s+/g, "-");
 }
 
-/** Roles are noisier than companies; normalise lightly and tolerate nulls. */
 export function roleKey(role: string | null): string {
   if (!role) return "";
   return role
@@ -115,55 +156,66 @@ export function roleKey(role: string | null): string {
 
 /* -------------------------------------------------------------- messages --- */
 
-const insertMessage = db.prepare(`
-  INSERT INTO messages (id, thread_id, from_addr, from_name, subject, snippet, body, internal_date, state)
-  VALUES (@id, @threadId, @fromAddr, @fromName, @subject, @snippet, @body, @internalDate, 'pending')
-  ON CONFLICT(id) DO NOTHING
-`);
-
-export function saveMessages(messages: GmailMessage[]): number {
-  const tx = db.transaction((rows: GmailMessage[]) => {
-    let inserted = 0;
-    for (const m of rows) inserted += insertMessage.run(m).changes;
-    return inserted;
-  });
-  return tx(messages);
+export async function saveMessages(messages: GmailMessage[]): Promise<number> {
+  let inserted = 0;
+  // Small batches keep email bodies below practical HTTP request limits.
+  for (let i = 0; i < messages.length; i += 100) {
+    const results = await db.batch(
+      messages.slice(i, i + 100).map((message) => ({
+        sql: `INSERT INTO messages
+          (id, thread_id, from_addr, from_name, subject, snippet, body, internal_date, state)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+          ON CONFLICT(id) DO NOTHING`,
+        args: [
+          message.id,
+          message.threadId,
+          message.fromAddr,
+          message.fromName,
+          message.subject,
+          message.snippet,
+          message.body,
+          message.internalDate,
+        ],
+      })),
+      "write",
+    );
+    inserted += results.reduce((total, result) => total + result.rowsAffected, 0);
+  }
+  return inserted;
 }
 
-export function knownMessageIds(ids: string[]): Set<string> {
-  if (ids.length === 0) return new Set();
+export async function knownMessageIds(ids: string[]): Promise<Set<string>> {
   const found = new Set<string>();
-  // Chunked to stay well under SQLite's variable limit on large first syncs.
   for (let i = 0; i < ids.length; i += 400) {
     const chunk = ids.slice(i, i + 400);
     const placeholders = chunk.map(() => "?").join(",");
-    const rows = db
-      .prepare(`SELECT id FROM messages WHERE id IN (${placeholders})`)
-      .all(...chunk) as { id: string }[];
-    for (const r of rows) found.add(r.id);
+    const result = await db.execute({ sql: `SELECT id FROM messages WHERE id IN (${placeholders})`, args: chunk });
+    for (const row of rows<{ id: string }>(result)) found.add(row.id);
   }
   return found;
 }
 
-export function pendingMessages(limit: number): GmailMessage[] {
-  const rows = db
-    .prepare(
-      `SELECT id, thread_id AS threadId, from_addr AS fromAddr, from_name AS fromName,
-              subject, snippet, body, internal_date AS internalDate
-       FROM messages WHERE state = 'pending'
-       ORDER BY internal_date ASC LIMIT ?`,
-    )
-    .all(limit) as GmailMessage[];
-  return rows;
+export async function pendingMessages(limit: number): Promise<GmailMessage[]> {
+  return rows<GmailMessage>(
+    await db.execute({
+      sql: `SELECT id, thread_id AS threadId, from_addr AS fromAddr, from_name AS fromName,
+                   subject, snippet, body, internal_date AS internalDate
+              FROM messages WHERE state = 'pending'
+             ORDER BY internal_date ASC LIMIT ?`,
+      args: [limit],
+    }),
+  );
 }
 
-export function markMessage(id: string, state: "prefiltered" | "classified", isJobRelated: boolean): void {
-  db.prepare(`UPDATE messages SET state = ?, is_job_related = ?, processed_at = ? WHERE id = ?`).run(
-    state,
-    isJobRelated ? 1 : 0,
-    Date.now(),
-    id,
-  );
+export async function markMessage(
+  id: string,
+  state: "prefiltered" | "classified",
+  isJobRelated: boolean,
+): Promise<void> {
+  await db.execute({
+    sql: `UPDATE messages SET state = ?, is_job_related = ?, processed_at = ? WHERE id = ?`,
+    args: [state, isJobRelated ? 1 : 0, Date.now(), id],
+  });
 }
 
 /* ---------------------------------------------------------- applications --- */
@@ -178,154 +230,165 @@ export interface UpsertInput {
   occurredAt: number;
 }
 
-/**
- * Resolve which application an email belongs to.
- *
- * Emails from one employer often disagree about the role: a confirmation names
- * it, while the rejection three weeks later just says "your application".
- * Matching strictly on (company, role) would split those into separate rows, so
- * an unknown role attaches to that company's most recent application, and a
- * newly-learned role adopts the row that was created without one.
- */
-function findApplication(cKey: string, rKey: string): ApplicationRow | undefined {
-  const exact = db
-    .prepare(`SELECT * FROM applications WHERE company_key = ? AND role_key = ?`)
-    .get(cKey, rKey) as ApplicationRow | undefined;
+async function findApplication(executor: Executor, cKey: string, rKey: string): Promise<ApplicationRow | undefined> {
+  const exact = first<ApplicationRow>(
+    await execute(executor, `SELECT * FROM applications WHERE company_key = ? AND role_key = ?`, [cKey, rKey]),
+  );
   if (exact) return exact;
 
   if (rKey === "") {
-    return db
-      .prepare(`SELECT * FROM applications WHERE company_key = ? ORDER BY last_event_at DESC LIMIT 1`)
-      .get(cKey) as ApplicationRow | undefined;
+    return first<ApplicationRow>(
+      await execute(
+        executor,
+        `SELECT * FROM applications WHERE company_key = ? ORDER BY last_event_at DESC LIMIT 1`,
+        [cKey],
+      ),
+    );
   }
 
-  return db
-    .prepare(`SELECT * FROM applications WHERE company_key = ? AND role_key = '' LIMIT 1`)
-    .get(cKey) as ApplicationRow | undefined;
+  return first<ApplicationRow>(
+    await execute(executor, `SELECT * FROM applications WHERE company_key = ? AND role_key = '' LIMIT 1`, [cKey]),
+  );
 }
 
-/**
- * Record one classified email against its application, creating the application
- * if needed. Status only moves forward in time: an older email cannot rewrite a
- * newer verdict, and a manual override is never overwritten automatically.
- */
-export function upsertApplicationEvent(input: UpsertInput): number {
+export async function upsertApplicationEvent(input: UpsertInput): Promise<number> {
   const cKey = companyKey(input.company);
   const rKey = roleKey(input.role);
 
-  const tx = db.transaction((): number => {
-    const existing = findApplication(cKey, rKey);
-
+  return writeTransaction(async (tx) => {
+    const existing = await findApplication(tx, cKey, rKey);
     let appId: number;
+
     if (!existing) {
-      const info = db
-        .prepare(
-          `INSERT INTO applications
-             (company, company_key, role, role_key, status, status_source, confidence, first_seen_at, last_event_at)
-           VALUES (?, ?, ?, ?, ?, 'model', ?, ?, ?)`,
-        )
-        .run(input.company, cKey, input.role, rKey, input.status, input.confidence, input.occurredAt, input.occurredAt);
-      appId = Number(info.lastInsertRowid);
+      const result = await execute(
+        tx,
+        `INSERT INTO applications
+          (company, company_key, role, role_key, status, status_source, confidence, first_seen_at, last_event_at)
+         VALUES (?, ?, ?, ?, ?, 'model', ?, ?, ?)`,
+        [input.company, cKey, input.role, rKey, input.status, input.confidence, input.occurredAt, input.occurredAt],
+      );
+      if (result.lastInsertRowid === undefined) throw new Error("Database did not return the new application id.");
+      appId = Number(result.lastInsertRowid);
     } else {
       appId = existing.id;
-      const isNewer = input.occurredAt >= existing.last_event_at;
-      const advance = isNewer && existing.status_source !== "manual";
-
-      // Fill in a role we did not previously know; never overwrite a known one.
+      const advance = input.occurredAt >= existing.last_event_at && existing.status_source !== "manual";
       const learnsRole = existing.role_key === "" && rKey !== "";
-      const role = learnsRole ? input.role : existing.role;
-      const roleK = learnsRole ? rKey : existing.role_key;
 
-      db.prepare(
+      await execute(
+        tx,
         `UPDATE applications
-            SET role          = ?,
-                role_key      = ?,
-                status        = ?,
-                confidence    = ?,
-                last_event_at = MAX(last_event_at, ?),
-                first_seen_at = MIN(first_seen_at, ?)
+            SET role = ?, role_key = ?, status = ?, confidence = ?,
+                last_event_at = MAX(last_event_at, ?), first_seen_at = MIN(first_seen_at, ?)
           WHERE id = ?`,
-      ).run(
-        role,
-        roleK,
-        advance ? input.status : existing.status,
-        advance ? input.confidence : existing.confidence,
-        input.occurredAt,
-        input.occurredAt,
-        appId,
+        [
+          learnsRole ? input.role : existing.role,
+          learnsRole ? rKey : existing.role_key,
+          advance ? input.status : existing.status,
+          advance ? input.confidence : existing.confidence,
+          input.occurredAt,
+          input.occurredAt,
+          appId,
+        ],
       );
     }
 
-    db.prepare(
+    await execute(
+      tx,
       `INSERT INTO events (application_id, message_id, status, confidence, summary, occurred_at, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(application_id, message_id) DO NOTHING`,
-    ).run(appId, input.messageId, input.status, input.confidence, input.summary, input.occurredAt, Date.now());
-
+      [appId, input.messageId, input.status, input.confidence, input.summary, input.occurredAt, Date.now()],
+    );
     return appId;
   });
-
-  return tx();
 }
 
-export function getApplication(id: number): ApplicationRow | undefined {
-  return db.prepare(`SELECT * FROM applications WHERE id = ?`).get(id) as ApplicationRow | undefined;
+async function getApplicationFrom(executor: Executor, id: number): Promise<ApplicationRow | undefined> {
+  return first<ApplicationRow>(await execute(executor, `SELECT * FROM applications WHERE id = ?`, [id]));
 }
 
-export function listApplications(): ApplicationRow[] {
-  return db
-    .prepare(`SELECT * FROM applications ORDER BY last_event_at DESC`)
-    .all() as ApplicationRow[];
+export function getApplication(id: number): Promise<ApplicationRow | undefined> {
+  return getApplicationFrom(db, id);
 }
 
-export function listEvents(applicationId: number): EventRow[] {
-  return db
-    .prepare(
-      `SELECT e.*, m.subject, m.from_addr
-         FROM events e
-         LEFT JOIN messages m ON m.id = e.message_id
-        WHERE e.application_id = ?
-        ORDER BY e.occurred_at DESC`,
-    )
-    .all(applicationId) as EventRow[];
+export async function listApplications(): Promise<ApplicationRow[]> {
+  return rows<ApplicationRow>(await db.execute(`SELECT * FROM applications ORDER BY last_event_at DESC`));
 }
 
-export function setStatus(id: number, status: Status): ApplicationRow | undefined {
-  db.prepare(`UPDATE applications SET status = ?, status_source = 'manual' WHERE id = ?`).run(status, id);
-  return getApplication(id);
+export interface ApplicationSummaryRow extends ApplicationRow {
+  event_count: number;
+  latest_summary: string | null;
 }
 
-export function setNotes(id: number, notes: string): ApplicationRow | undefined {
-  db.prepare(`UPDATE applications SET notes = ? WHERE id = ?`).run(notes, id);
-  return getApplication(id);
+/** Board data in one remote query instead of one event query per card. */
+export async function listApplicationSummaries(): Promise<ApplicationSummaryRow[]> {
+  return rows<ApplicationSummaryRow>(
+    await db.execute(`SELECT a.*,
+      (SELECT COUNT(*) FROM events e WHERE e.application_id = a.id) AS event_count,
+      (SELECT summary FROM events e WHERE e.application_id = a.id
+        ORDER BY e.occurred_at DESC LIMIT 1) AS latest_summary
+      FROM applications a ORDER BY a.last_event_at DESC`),
+  );
 }
 
-export function deleteApplication(id: number): boolean {
-  return db.prepare(`DELETE FROM applications WHERE id = ?`).run(id).changes > 0;
+export async function listEvents(applicationId: number): Promise<EventRow[]> {
+  return rows<EventRow>(
+    await db.execute({
+      sql: `SELECT e.*, m.subject, m.from_addr
+              FROM events e LEFT JOIN messages m ON m.id = e.message_id
+             WHERE e.application_id = ? ORDER BY e.occurred_at DESC`,
+      args: [applicationId],
+    }),
+  );
+}
+
+export async function setStatus(id: number, status: Status): Promise<ApplicationRow | undefined> {
+  return first<ApplicationRow>(
+    await db.execute({
+      sql: `UPDATE applications SET status = ?, status_source = 'manual' WHERE id = ? RETURNING *`,
+      args: [status, id],
+    }),
+  );
+}
+
+export async function setNotes(id: number, notes: string): Promise<ApplicationRow | undefined> {
+  return first<ApplicationRow>(
+    await db.execute({ sql: `UPDATE applications SET notes = ? WHERE id = ? RETURNING *`, args: [notes, id] }),
+  );
+}
+
+export async function deleteApplication(id: number): Promise<boolean> {
+  return writeTransaction(async (tx) => {
+    await execute(tx, `DELETE FROM merge_dismissals WHERE app_a = ? OR app_b = ?`, [id, id]);
+    await execute(tx, `DELETE FROM events WHERE application_id = ?`, [id]);
+    const result = await execute(tx, `DELETE FROM applications WHERE id = ?`, [id]);
+    return result.rowsAffected > 0;
+  });
 }
 
 /* --------------------------------------------------------- de-duplication --- */
 
-/** Order-independent pair id, so (a,b) and (b,a) address the same row. */
 function orderedPair(a: number, b: number): [number, number] {
   return a < b ? [a, b] : [b, a];
 }
 
-/** Record "these two are not the same application", permanently. */
-export function dismissPair(a: number, b: number): void {
+export async function dismissPair(a: number, b: number): Promise<void> {
   const [lo, hi] = orderedPair(a, b);
-  db.prepare(
-    `INSERT INTO merge_dismissals (app_a, app_b, created_at) VALUES (?, ?, ?)
-     ON CONFLICT(app_a, app_b) DO NOTHING`,
-  ).run(lo, hi, Date.now());
+  await db.execute({
+    sql: `INSERT INTO merge_dismissals (app_a, app_b, created_at) VALUES (?, ?, ?)
+          ON CONFLICT(app_a, app_b) DO NOTHING`,
+    args: [lo, hi, Date.now()],
+  });
 }
 
-/** Every application already ruled out as a duplicate of `id`. */
-export function dismissedFor(id: number): Set<number> {
-  const rows = db
-    .prepare(`SELECT app_a, app_b FROM merge_dismissals WHERE app_a = ? OR app_b = ?`)
-    .all(id, id) as { app_a: number; app_b: number }[];
-  return new Set(rows.map((r) => (r.app_a === id ? r.app_b : r.app_a)));
+export async function dismissedFor(id: number): Promise<Set<number>> {
+  const result = await db.execute({
+    sql: `SELECT app_a, app_b FROM merge_dismissals WHERE app_a = ? OR app_b = ?`,
+    args: [id, id],
+  });
+  return new Set(
+    rows<{ app_a: number; app_b: number }>(result).map((row) => (row.app_a === id ? row.app_b : row.app_a)),
+  );
 }
 
 export interface Verdict {
@@ -334,150 +397,156 @@ export interface Verdict {
   reason: string;
 }
 
-export function getVerdict(pairKey: string): Verdict | null {
-  const row = db.prepare(`SELECT similar, score, reason FROM similarity_verdicts WHERE pair_key = ?`).get(pairKey) as
-    | { similar: number; score: number; reason: string }
-    | undefined;
+export async function getVerdict(pairKey: string): Promise<Verdict | null> {
+  const row = first<{ similar: number; score: number; reason: string }>(
+    await db.execute({ sql: `SELECT similar, score, reason FROM similarity_verdicts WHERE pair_key = ?`, args: [pairKey] }),
+  );
   return row ? { similar: row.similar === 1, score: row.score, reason: row.reason } : null;
 }
 
-export function putVerdict(pairKey: string, v: Verdict): void {
-  db.prepare(
-    `INSERT INTO similarity_verdicts (pair_key, similar, score, reason, created_at)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(pair_key) DO UPDATE SET
-       similar = excluded.similar, score = excluded.score, reason = excluded.reason, created_at = excluded.created_at`,
-  ).run(pairKey, v.similar ? 1 : 0, v.score, v.reason, Date.now());
+export async function putVerdict(pairKey: string, verdict: Verdict): Promise<void> {
+  await db.execute({
+    sql: `INSERT INTO similarity_verdicts (pair_key, similar, score, reason, created_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(pair_key) DO UPDATE SET similar = excluded.similar, score = excluded.score,
+            reason = excluded.reason, created_at = excluded.created_at`,
+    args: [pairKey, verdict.similar ? 1 : 0, verdict.score, verdict.reason, Date.now()],
+  });
 }
 
 export interface AppSignals {
-  /** Gmail threads this application's emails came from. */
   threads: Set<string>;
-  /** Sending domains, minus shared ATS and consumer mail hosts. */
   domains: Set<string>;
 }
 
-/**
- * Domains that say nothing about *which* employer sent an email: every company
- * using Greenhouse mails from the same host, so treating these as identity
- * evidence would make every ATS-driven application look like every other.
- */
 const GENERIC_DOMAINS =
   /(^|\.)(greenhouse|greenhouse-mail|lever|hire\.lever|ashbyhq|myworkday|workday|icims|smartrecruiters|taleo|jobvite|breezy|breezy-?hr|workable|recruitee|bamboohr|successfactors|oraclecloud|paylocity|dayforce|jazzhr|teamtailor|rippling|gmail|googlemail|outlook|hotmail|yahoo|icloud|proton|protonmail)\./;
 
-/** Thread ids and sender domains behind every application, in a single pass. */
-export function applicationSignals(): Map<number, AppSignals> {
-  const rows = db
-    .prepare(
-      `SELECT e.application_id AS id, m.thread_id AS threadId, m.from_addr AS fromAddr
-         FROM events e JOIN messages m ON m.id = e.message_id`,
-    )
-    .all() as { id: number; threadId: string; fromAddr: string }[];
-
+export async function applicationSignals(): Promise<Map<number, AppSignals>> {
+  const result = await db.execute(
+    `SELECT e.application_id AS id, m.thread_id AS threadId, m.from_addr AS fromAddr
+       FROM events e JOIN messages m ON m.id = e.message_id`,
+  );
   const out = new Map<number, AppSignals>();
-  for (const r of rows) {
-    let entry = out.get(r.id);
-    if (!entry) out.set(r.id, (entry = { threads: new Set(), domains: new Set() }));
-    if (r.threadId) entry.threads.add(r.threadId);
-
-    const domain = r.fromAddr.split("@")[1]?.toLowerCase().replace(/[>\s]/g, "");
+  for (const row of rows<{ id: number; threadId: string; fromAddr: string }>(result)) {
+    let entry = out.get(row.id);
+    if (!entry) out.set(row.id, (entry = { threads: new Set(), domains: new Set() }));
+    if (row.threadId) entry.threads.add(row.threadId);
+    const domain = row.fromAddr.split("@")[1]?.toLowerCase().replace(/[>\s]/g, "");
     if (domain && !GENERIC_DOMAINS.test(`${domain}.`)) entry.domains.add(domain);
   }
   return out;
 }
 
-/** Newest event on an application, ties broken by how far along the stage is. */
-function latestEvent(applicationId: number): EventRow | undefined {
-  const rows = db.prepare(`SELECT * FROM events WHERE application_id = ?`).all(applicationId) as EventRow[];
-  return rows.sort((a, b) => b.occurred_at - a.occurred_at || STATUS_RANK[b.status] - STATUS_RANK[a.status])[0];
+async function latestEvent(executor: Executor, applicationId: number): Promise<EventRow | undefined> {
+  const result = await execute(executor, `SELECT * FROM events WHERE application_id = ?`, [applicationId]);
+  return rows<EventRow>(result).sort(
+    (a, b) => b.occurred_at - a.occurred_at || STATUS_RANK[b.status] - STATUS_RANK[a.status],
+  )[0];
 }
 
-/**
- * Fold `sourceId` into `targetId`, then delete the source.
- *
- * The target survives so the UI keeps its selection; everything else is a union.
- * Every event moves across, the window widens to cover both, and the source's
- * role or hand-set status is adopted only where the target has none of its own —
- * a merge should never lose information the user could not recover.
- */
-export function mergeApplications(targetId: number, sourceId: number): ApplicationRow | undefined {
+export async function mergeApplications(targetId: number, sourceId: number): Promise<ApplicationRow | undefined> {
   if (targetId === sourceId) return getApplication(targetId);
 
-  const tx = db.transaction((): ApplicationRow | undefined => {
-    const target = getApplication(targetId);
-    const source = getApplication(sourceId);
+  return writeTransaction(async (tx) => {
+    const target = await getApplicationFrom(tx, targetId);
+    const source = await getApplicationFrom(tx, sourceId);
     if (!target || !source) return undefined;
 
-    // One email can already be recorded against both rows. OR IGNORE leaves that
-    // duplicate behind on the source, where deleting the source cascades it away.
-    db.prepare(`UPDATE OR IGNORE events SET application_id = ? WHERE application_id = ?`).run(targetId, sourceId);
-    db.prepare(`DELETE FROM applications WHERE id = ?`).run(sourceId);
+    await execute(tx, `UPDATE OR IGNORE events SET application_id = ? WHERE application_id = ?`, [targetId, sourceId]);
+    await execute(tx, `DELETE FROM events WHERE application_id = ?`, [sourceId]);
+    await execute(tx, `DELETE FROM merge_dismissals WHERE app_a = ? OR app_b = ?`, [sourceId, sourceId]);
+    await execute(tx, `DELETE FROM applications WHERE id = ?`, [sourceId]);
 
-    // Adopting a role rewrites role_key, which is half of a UNIQUE constraint —
-    // so only when the target has no role of its own and no third row holds the
-    // pair already. Checked after the delete, when the source no longer counts.
-    const taken = db
-      .prepare(`SELECT 1 FROM applications WHERE company_key = ? AND role_key = ? AND id != ?`)
-      .get(target.company_key, source.role_key, targetId);
-    const adoptsRole = target.role_key === "" && source.role_key !== "" && !taken;
-
-    const manual =
-      target.status_source === "manual" ? target : source.status_source === "manual" ? source : null;
-    const latest = latestEvent(targetId);
-
-    const notes = [target.notes, source.notes].filter((n) => n?.trim()).join("\n\n") || null;
-
-    db.prepare(
-      `UPDATE applications
-          SET role          = ?,
-              role_key      = ?,
-              status        = ?,
-              status_source = ?,
-              confidence    = ?,
-              first_seen_at = MIN(first_seen_at, ?),
-              last_event_at = MAX(last_event_at, ?),
-              notes         = ?
-        WHERE id = ?`,
-    ).run(
-      adoptsRole ? source.role : target.role,
-      adoptsRole ? source.role_key : target.role_key,
-      manual ? manual.status : (latest?.status ?? target.status),
-      manual ? "manual" : "model",
-      manual ? manual.confidence : (latest?.confidence ?? target.confidence),
-      source.first_seen_at,
-      source.last_event_at,
-      notes,
-      targetId,
+    const taken = first<{ found: number }>(
+      await execute(
+        tx,
+        `SELECT 1 AS found FROM applications WHERE company_key = ? AND role_key = ? AND id != ?`,
+        [target.company_key, source.role_key, targetId],
+      ),
     );
+    const adoptsRole = target.role_key === "" && source.role_key !== "" && !taken;
+    const manual = target.status_source === "manual" ? target : source.status_source === "manual" ? source : null;
+    const latest = await latestEvent(tx, targetId);
+    const notes = [target.notes, source.notes].filter((note) => note?.trim()).join("\n\n") || null;
 
-    return getApplication(targetId);
+    await execute(
+      tx,
+      `UPDATE applications
+          SET role = ?, role_key = ?, status = ?, status_source = ?, confidence = ?,
+              first_seen_at = MIN(first_seen_at, ?), last_event_at = MAX(last_event_at, ?), notes = ?
+        WHERE id = ?`,
+      [
+        adoptsRole ? source.role : target.role,
+        adoptsRole ? source.role_key : target.role_key,
+        manual ? manual.status : (latest?.status ?? target.status),
+        manual ? "manual" : "model",
+        manual ? manual.confidence : (latest?.confidence ?? target.confidence),
+        source.first_seen_at,
+        source.last_event_at,
+        notes,
+        targetId,
+      ],
+    );
+    return getApplicationFrom(tx, targetId);
   });
-
-  return tx();
 }
 
 /* -------------------------------------------------------------- metadata --- */
 
-export function getMeta(key: string): string | null {
-  const row = db.prepare(`SELECT value FROM meta WHERE key = ?`).get(key) as { value: string } | undefined;
+export async function getMeta(key: string): Promise<string | null> {
+  const row = first<{ value: string }>(
+    await db.execute({ sql: `SELECT value FROM meta WHERE key = ?`, args: [key] }),
+  );
   return row?.value ?? null;
 }
 
-export function setMeta(key: string, value: string): void {
-  db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(
-    key,
-    value,
-  );
+export async function setMeta(key: string, value: string): Promise<void> {
+  await db.execute({
+    sql: `INSERT INTO meta (key, value) VALUES (?, ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    args: [key, value],
+  });
 }
 
-export function stats() {
-  const one = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
-  return {
-    messages: one(`SELECT COUNT(*) AS n FROM messages`),
-    pending: one(`SELECT COUNT(*) AS n FROM messages WHERE state = 'pending'`),
-    prefiltered: one(`SELECT COUNT(*) AS n FROM messages WHERE state = 'prefiltered'`),
-    classified: one(`SELECT COUNT(*) AS n FROM messages WHERE state = 'classified'`),
-    applications: one(`SELECT COUNT(*) AS n FROM applications`),
-    events: one(`SELECT COUNT(*) AS n FROM events`),
-  };
+export async function getEncryptedOAuthCredentials(): Promise<string | null> {
+  const row = first<{ encrypted_token: string }>(
+    await db.execute(`SELECT encrypted_token FROM oauth_credentials WHERE id = 1`),
+  );
+  return row?.encrypted_token ?? null;
+}
+
+export async function setEncryptedOAuthCredentials(value: string): Promise<void> {
+  await db.execute({
+    sql: `INSERT INTO oauth_credentials (id, encrypted_token, updated_at) VALUES (1, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET encrypted_token = excluded.encrypted_token,
+            updated_at = excluded.updated_at`,
+    args: [value, Date.now()],
+  });
+}
+
+export async function deleteOAuthCredentials(): Promise<void> {
+  await db.execute(`DELETE FROM oauth_credentials WHERE id = 1`);
+}
+
+export interface DatabaseStats {
+  messages: number;
+  pending: number;
+  prefiltered: number;
+  classified: number;
+  applications: number;
+  events: number;
+}
+
+export async function stats(): Promise<DatabaseStats> {
+  const result = await db.execute(`SELECT
+    (SELECT COUNT(*) FROM messages) AS messages,
+    (SELECT COUNT(*) FROM messages WHERE state = 'pending') AS pending,
+    (SELECT COUNT(*) FROM messages WHERE state = 'prefiltered') AS prefiltered,
+    (SELECT COUNT(*) FROM messages WHERE state = 'classified') AS classified,
+    (SELECT COUNT(*) FROM applications) AS applications,
+    (SELECT COUNT(*) FROM events) AS events`);
+  const value = first<DatabaseStats>(result);
+  if (!value) throw new Error("Database did not return statistics.");
+  return value;
 }

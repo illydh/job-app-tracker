@@ -27,8 +27,8 @@ jobs:
           node-version: 22
           cache: npm
 
-      # The server workspace builds native modules that the frontend does not
-      # need, so install and build the web workspace on its own.
+      # This workflow deploys only static frontend assets, so install and build
+      # the web workspace on its own.
       - name: Install web dependencies
         run: npm install --workspace web --include-workspace-root=false
 

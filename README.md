@@ -1,14 +1,13 @@
 # Job Application Tracker
 
-A self-hosted tool that reads your Gmail, uses a **local** LLM to identify
+A self-hosted tool that reads your Gmail, uses an LLM to identify
 job-application emails, and tracks each application through its interview
 stage on a simple board.
 
-It is built to run entirely on your machine: email is fetched read-only,
-classified by Ollama on localhost, and stored in a local SQLite file. Nothing
-is sent to a third-party server. If you deploy the UI to GitHub Pages, that
-static page is the only piece that leaves your machine — it still talks to
-your local API and database, as described [below](#a-note-on-github-pages).
+Local development remains entirely local: email is fetched read-only,
+classified by Ollama on localhost, and stored in a SQLite file. The backend can
+also run on Render with Turso for persistent storage; that hosted mode sends
+stored message data to those services. See [the deployment guide](RENDER_DEPLOYMENT.md).
 
 This is a personal, MVP-stage project rather than a polished product. It
 requires a Gmail OAuth client and a running Ollama instance to be useful — see
@@ -20,8 +19,8 @@ are listed under [Not in the MVP](#not-in-the-mvp).
 ## How it is put together
 
 ```
-Gmail API ──▶ SQLite ──▶ keyword gate ──▶ Ollama ──▶ applications + events
-  (read-only)   (local)    (free, fast)    (local)         │
+Gmail API ──▶ SQLite/Turso ──▶ keyword gate ──▶ Ollama ──▶ applications + events
+  (read-only)   (storage)       (free, fast)    (model)          │
                                                            ▼
                                             React UI (GitHub Pages or localhost)
 ```
@@ -29,14 +28,14 @@ Gmail API ──▶ SQLite ──▶ keyword gate ──▶ Ollama ──▶ app
 | Piece | Choice | Why |
 | --- | --- | --- |
 | Backend | Node + Express + TypeScript | Runs natively via `--experimental-strip-types`; no build step in dev |
-| Storage | SQLite (`better-sqlite3`) | One file, zero setup, real relational queries. Swappable later |
-| Model | Ollama, JSON-schema constrained | Runs locally; the schema makes malformed output impossible |
+| Storage | libSQL (`@libsql/client`) | Local SQLite by default; Turso when configured |
+| Model | Ollama, JSON-schema constrained | Local by default; the schema makes malformed output impossible |
 | Frontend | React + TypeScript + Vite | Static build, deployable to Pages |
 
 ### A note on GitHub Pages
 
-Pages serves **static files only** — it cannot host the Node server, and Ollama
-is local by design. So the split is:
+Pages serves **static files only** — it cannot host the Node server. By default,
+the split is:
 
 - **GitHub Pages** hosts the React UI.
 - **Your machine** runs the API, the database, and the model.
@@ -46,6 +45,9 @@ treat `http://localhost` as a trusted origin and allow this from an HTTPS page;
 **Safari blocks it**, so use another browser for the hosted version, or just run
 the UI locally with `npm run dev` — which works everywhere and is the simpler
 path day to day.
+
+Alternatively, point the frontend at a Render-hosted backend as described in
+[the Render + Turso guide](RENDER_DEPLOYMENT.md).
 
 ---
 
@@ -116,8 +118,16 @@ your own app, asking for read-only access to your own mailbox.
 cp server/.env.example server/.env
 ```
 
-Fill in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. The defaults for
-everything else are sensible; `SYNC_SINCE=2026-08-01` sets how far back to read.
+Fill in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, then generate the token
+encryption key:
+
+```bash
+openssl rand -base64 32
+```
+
+Put that output in `TOKEN_ENCRYPTION_KEY`. Leave the Turso variables blank for
+local SQLite, or fill them from Turso's Connect page for remote storage.
+`SYNC_SINCE=2026-08-01` sets how far back to read.
 
 ### 5. Run
 
@@ -139,6 +149,9 @@ There is also a terminal equivalent, if you would rather not use the browser:
 ```bash
 npm run auth
 ```
+
+Stop the server before using this command, or restart it afterward so it reloads
+the stored credentials.
 
 ---
 
@@ -202,6 +215,8 @@ npm run dev          # API + UI together
 npm run dev:server   # API only, watch mode
 npm run auth         # (re-)authorise Gmail
 npm run sync         # run one sync from the terminal
+npm run migrate:turso --workspace server  # one-time local-to-Turso import
+npm run test:db --workspace server        # credential-free database tests
 npm run typecheck    # typecheck both workspaces
 npm run build        # compile server, build static UI
 ```
@@ -225,8 +240,9 @@ Then, in `server/.env`, allow the hosted origin to call your local API:
 ALLOWED_ORIGINS=http://localhost:5173,https://<your-username>.github.io
 ```
 
-On the hosted page, open **Setup** and confirm the backend address is
-`http://localhost:4000`. It is remembered in `localStorage`.
+On the hosted page, open **Setup** and enter `http://localhost:4000` for a local
+backend or the Render HTTPS URL for a hosted backend. It is remembered in
+`localStorage`.
 
 ---
 
@@ -253,10 +269,11 @@ only syncing needs it.
 ## Privacy
 
 - Gmail scope is `gmail.readonly` — the app cannot send, modify, or delete mail.
-- The OAuth token (`server/data/token.json`) and database (`server/data/tracker.db`)
-  are local and gitignored.
-- Email bodies are stored locally, truncated to 4 000 characters, and sent only
-  to `localhost:11434`.
+- Locally, the database stays in `server/data/tracker.db`, which is gitignored.
+- With Turso configured, email data is stored remotely. Gmail credentials are
+  encrypted before storage; keep `TOKEN_ENCRYPTION_KEY` separate and secret.
+- Email bodies are truncated to 4 000 characters and sent to the configured
+  `OLLAMA_HOST` for classification.
 - To revoke access entirely: **Setup → Disconnect**, then remove the app at
   [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
 
@@ -273,11 +290,11 @@ APP_PASSWORD=choose-something-only-you-know
 Restart the server and the UI will show a lock screen until the right
 password is entered. The browser then remembers a token in `localStorage`, so
 you are not re-prompted on every visit; changing `APP_PASSWORD` invalidates
-that token everywhere. Leave it blank to keep the previous no-login behaviour.
+that token everywhere. Leave it blank only for local loopback use.
 
-This protects the UI and API from anyone else with access to this machine or
-browser — it is not a substitute for the loopback binding (`HOST=127.0.0.1`),
-which is what keeps the API off your network in the first place.
+This protects the UI and API from anyone else with access to the endpoint. Use
+`HOST=127.0.0.1` locally. For an internet-accessible Render service, set
+`HOST=0.0.0.0` and always configure `APP_PASSWORD`.
 
 ---
 
@@ -290,3 +307,5 @@ Deliberately left out, in rough priority order:
 - Merging duplicate applications in the UI
 - Reminders for applications going quiet
 - Export
+- Search bar above each category for quick company search
+- 

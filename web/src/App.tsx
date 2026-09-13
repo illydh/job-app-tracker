@@ -36,6 +36,7 @@ export default function App() {
         // The stored token was rejected — server restarted with a new
         // password, or there never was a valid one. Back to the login screen.
         setAuthToken(null);
+        setAuthRequired(true);
         setAuthed(false);
         setHealth(null);
       } else {

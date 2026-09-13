@@ -1,6 +1,10 @@
 /** Run one sync from the terminal and print the outcome. */
 import { runSync } from "../lib/sync.ts";
-import { stats } from "../lib/db.ts";
+import { initializeDatabase, stats } from "../lib/db.ts";
+import { initializeTokenStore } from "../lib/gmail.ts";
+
+await initializeDatabase();
+await initializeTokenStore();
 
 const result = await runSync();
 
@@ -10,5 +14,5 @@ if (result.errors.length > 0) {
   console.log(`  ${result.errors.length} error(s):`);
   for (const e of result.errors.slice(0, 10)) console.log(`    - ${e}`);
 }
-console.log(`  totals:`, stats(), "\n");
+console.log(`  totals:`, await stats(), "\n");
 process.exit(result.phase === "error" ? 1 : 0);

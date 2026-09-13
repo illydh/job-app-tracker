@@ -10,11 +10,13 @@
     "start": "node dist/index.js",
     "auth": "node --experimental-strip-types src/scripts/auth.ts",
     "sync": "node --experimental-strip-types src/scripts/sync-cli.ts",
+    "migrate:turso": "node --experimental-strip-types src/scripts/migrate-to-turso.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:classify": "node --experimental-strip-types src/scripts/test-classify.ts"
+    "test:classify": "node --experimental-strip-types src/scripts/test-classify.ts",
+    "test:db": "node --experimental-strip-types src/scripts/test-db.ts"
   },
   "dependencies": {
-    "better-sqlite3": "^11.8.1",
+    "@libsql/client": "^0.18.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
@@ -22,7 +24,6 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^22.10.5",

@@ -10,6 +10,8 @@ const serverRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 // credential when the server was started from anywhere else.
 dotenv.config({ path: path.join(serverRoot, ".env") });
 
+const localDatabasePath = process.env.DB_PATH ?? path.join(serverRoot, "data", "tracker.db");
+
 function int(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -20,8 +22,8 @@ function int(name: string, fallback: number): number {
 export const config = {
   port: int("PORT", 4000),
   /**
-   * Loopback only by default. This API serves parsed email content with no
-   * authentication, so it must not be reachable from the local network.
+   * Loopback only by default. Parsed email content must not become reachable
+   * from the local network accidentally.
    */
   host: process.env.HOST ?? "127.0.0.1",
 
@@ -47,9 +49,15 @@ export const config = {
     redirectUri: process.env.GOOGLE_REDIRECT_URI ?? "http://localhost:4000/api/auth/callback",
   },
 
-  /** Where the OAuth refresh token is cached. Never commit this file. */
-  tokenPath: process.env.TOKEN_PATH ?? path.join(serverRoot, "data", "token.json"),
-  dbPath: process.env.DB_PATH ?? path.join(serverRoot, "data", "tracker.db"),
+  database: {
+    /** Turso in production; the existing SQLite file remains the local default. */
+    url: process.env.TURSO_DATABASE_URL?.trim() || `file:${localDatabasePath}`,
+    authToken: process.env.TURSO_AUTH_TOKEN?.trim() || undefined,
+    localPath: localDatabasePath,
+  },
+
+  /** Base64-encoded 32-byte key used only to encrypt Gmail credentials. */
+  tokenEncryptionKey: process.env.TOKEN_ENCRYPTION_KEY?.trim() ?? "",
 
   /** Earliest email to consider, YYYY-MM-DD. */
   syncSince: process.env.SYNC_SINCE ?? "2026-08-01",

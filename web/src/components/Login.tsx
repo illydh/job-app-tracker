@@ -34,7 +34,7 @@ export function Login({ onSuccess }: Props) {
     <div className="landing">
       <div className="landing-card">
         <h1 className="landing-title">Job Application Tracker</h1>
-        <p className="landing-lede">This tracker is password-protected on this machine.</p>
+        <p className="landing-lede">This tracker is password-protected.</p>
 
         <form className="setting" onSubmit={handleSubmit}>
           <label htmlFor="login-password">Password</label>

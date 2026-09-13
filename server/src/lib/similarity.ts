@@ -137,17 +137,17 @@ function warnOnce(message: string): void {
  * through the board must not leave a queue of model calls running behind it.
  */
 export async function findDuplicates(id: number, signal?: AbortSignal): Promise<SimilarCandidate[]> {
-  const target = store.getApplication(id);
+  const target = await store.getApplication(id);
   if (!target) return [];
 
-  const dismissed = store.dismissedFor(id);
-  const signals = store.applicationSignals();
+  const dismissed = await store.dismissedFor(id);
+  const signals = await store.applicationSignals();
   const mine = signals.get(id) ?? { threads: new Set<string>(), domains: new Set<string>() };
 
   const found: SimilarCandidate[] = [];
   const ambiguous: { row: ApplicationRow; score: number }[] = [];
 
-  for (const other of store.listApplications()) {
+  for (const other of await store.listApplications()) {
     if (other.id === id || dismissed.has(other.id)) continue;
 
     const theirs = signals.get(other.id) ?? { threads: new Set<string>(), domains: new Set<string>() };
@@ -155,7 +155,7 @@ export async function findDuplicates(id: number, signal?: AbortSignal): Promise<
     // A shared Gmail thread is the one signal that does not depend on what the
     // model called anything, so it bypasses the rest of the ladder.
     if (shareAny(mine.threads, theirs.threads)) {
-      found.push(describe(other, 0.97, "Both were built from the same email thread.", "thread"));
+      found.push(await describe(other, 0.97, "Both were built from the same email thread.", "thread"));
       continue;
     }
 
@@ -173,7 +173,7 @@ export async function findDuplicates(id: number, signal?: AbortSignal): Promise<
     const score = 0.35 * company + 0.65 * role;
 
     if (role >= ROLE_CERTAIN) {
-      found.push(describe(other, score, "Same employer, and the roles read as one job.", "lexical"));
+      found.push(await describe(other, score, "Same employer, and the roles read as one job.", "lexical"));
     } else if (score >= ASK_FLOOR) {
       ambiguous.push({ row: other, score });
     }
@@ -188,14 +188,14 @@ export async function findDuplicates(id: number, signal?: AbortSignal): Promise<
 
   for (const { row } of ambiguous.slice(0, MODEL_BUDGET)) {
     const key = pairKey(target, row);
-    let verdict = store.getVerdict(key);
+    let verdict = await store.getVerdict(key);
 
     if (!verdict) {
       if (!modelUsable || signal?.aborted) break;
       try {
         const judged = await judgeDuplicate(target, row, signal);
         verdict = { similar: judged.same, score: judged.confidence, reason: judged.reason.slice(0, 120) };
-        store.putVerdict(key, verdict);
+        await store.putVerdict(key, verdict);
       } catch (err) {
         // Not an error the user needs to see: fall back to the lexical answer,
         // which for these pairs is "probably not a duplicate".
@@ -206,24 +206,24 @@ export async function findDuplicates(id: number, signal?: AbortSignal): Promise<
     }
 
     if (verdict.similar && verdict.score >= MODEL_MIN_CONFIDENCE) {
-      found.push(describe(row, verdict.score, verdict.reason || "The model reads these as one application.", "model"));
+      found.push(await describe(row, verdict.score, verdict.reason || "The model reads these as one application.", "model"));
     }
   }
 
   return found.sort((a, b) => b.score - a.score);
 }
 
-function describe(
+async function describe(
   row: ApplicationRow,
   score: number,
   reason: string,
   basis: SimilarCandidate["basis"],
-): SimilarCandidate {
+): Promise<SimilarCandidate> {
   return {
     id: row.id,
     company: row.company,
     role: row.role,
-    eventCount: store.listEvents(row.id).length,
+    eventCount: (await store.listEvents(row.id)).length,
     lastEventAt: row.last_event_at,
     score,
     reason,

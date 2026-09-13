@@ -10,7 +10,7 @@ interface Props {
 
 /**
  * Setup lives in the UI rather than a build-time constant because the static
- * site is served from GitHub Pages while the API runs on the user's machine.
+ * UI and API can be served from different origins.
  */
 export function SettingsPanel({ health, healthError, onSaved }: Props) {
   const [base, setBase] = useState(getApiBase());
@@ -38,7 +38,7 @@ export function SettingsPanel({ health, healthError, onSaved }: Props) {
           </button>
         </div>
         <p className="muted small">
-          The server runs locally: <code>npm run dev:server</code> in the project folder.
+          Use <code>http://localhost:4000</code> locally, or your Render HTTPS URL.
         </p>
       </div>
 
@@ -66,20 +66,20 @@ export function SettingsPanel({ health, healthError, onSaved }: Props) {
 
       {healthError && (
         <p className="notice notice-bad">
-          Cannot reach the backend at <code>{getApiBase()}</code>. Start it with <code>npm run dev:server</code>,
+          Cannot reach the backend at <code>{getApiBase()}</code>. Check the address and service status,
           then Save above. {healthError}
         </p>
       )}
 
       {health && !health.ollama.reachable && (
         <p className="notice notice-bad">
-          Ollama is not responding. Run <code>ollama serve</code>.
+          Ollama endpoint is not responding. Check <code>OLLAMA_HOST</code>.
         </p>
       )}
 
       {health && health.ollama.reachable && !health.ollama.modelAvailable && (
         <p className="notice notice-bad">
-          Model not installed. Run <code>ollama pull {health.ollama.model}</code>.
+          Configured model unavailable. Check <code>OLLAMA_MODEL</code> on the model host.
         </p>
       )}
 

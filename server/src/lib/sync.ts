@@ -52,7 +52,7 @@ export function isSyncing(): boolean {
 }
 
 /**
- * Full pipeline: Gmail -> SQLite -> keyword gate -> local model -> applications.
+ * Full pipeline: Gmail -> database -> keyword gate -> local model -> applications.
  *
  * Runs at most once at a time. Progress is exposed via `syncProgress()` so the
  * UI can poll; classification is slow enough (seconds per email) that the HTTP
@@ -65,7 +65,7 @@ export async function runSync(): Promise<SyncProgress> {
 
   try {
     const client = authorizedClient();
-    if (!client) throw new Error("Not connected to Gmail. Visit /api/auth/start to authorise.");
+    if (!client) throw new Error("Not connected to Gmail. Use Connect Gmail in the UI or run `npm run auth`.");
 
     const ollama = await health();
     if (!ollama.reachable) {
@@ -76,22 +76,22 @@ export async function runSync(): Promise<SyncProgress> {
     }
 
     /* ------------------------------------------------- fetch new messages --- */
-    const lastSyncAt = store.getMeta("last_sync_at");
+    const lastSyncAt = await store.getMeta("last_sync_at");
     const since = effectiveSyncSince(lastSyncAt ? Number(lastSyncAt) : null);
     progress.message = `Listing messages since ${since}…`;
     const ids = await listMessageIds(client, config.maxMessagesPerSync, since);
-    const known = store.knownMessageIds(ids);
+    const known = await store.knownMessageIds(ids);
     const fresh = ids.filter((id) => !known.has(id));
 
     progress.message = `${fresh.length} new message(s) to download`;
     if (fresh.length > 0) {
       const messages = await fetchMessages(client, fresh);
-      progress.fetched = store.saveMessages(messages);
+      progress.fetched = await store.saveMessages(messages);
     }
 
     /* ------------------------------------------------- classify what's new --- */
     progress.phase = "classifying";
-    const pending = store.pendingMessages(config.maxMessagesPerSync);
+    const pending = await store.pendingMessages(config.maxMessagesPerSync);
     progress.total = pending.length;
 
     for (const [index, msg] of pending.entries()) {
@@ -99,7 +99,7 @@ export async function runSync(): Promise<SyncProgress> {
 
       const gate = prefilter(msg);
       if (!gate.keep) {
-        store.markMessage(msg.id, "prefiltered", false);
+        await store.markMessage(msg.id, "prefiltered", false);
         progress.prefiltered++;
         continue;
       }
@@ -109,7 +109,7 @@ export async function runSync(): Promise<SyncProgress> {
         progress.classified++;
 
         if (result.is_job_application && result.status && result.company && result.confidence >= config.minConfidence) {
-          store.upsertApplicationEvent({
+          await store.upsertApplicationEvent({
             company: result.company,
             role: result.role,
             status: result.status,
@@ -119,9 +119,9 @@ export async function runSync(): Promise<SyncProgress> {
             occurredAt: msg.internalDate,
           });
           progress.matched++;
-          store.markMessage(msg.id, "classified", true);
+          await store.markMessage(msg.id, "classified", true);
         } else {
-          store.markMessage(msg.id, "classified", false);
+          await store.markMessage(msg.id, "classified", false);
         }
       } catch (err) {
         // Leave the message pending so the next sync retries it.
@@ -131,7 +131,7 @@ export async function runSync(): Promise<SyncProgress> {
       }
     }
 
-    store.setMeta("last_sync_at", String(Date.now()));
+    await store.setMeta("last_sync_at", String(Date.now()));
     progress.phase = "done";
     progress.finishedAt = Date.now();
     progress.message = `Done — ${progress.matched} application update(s) from ${progress.classified} email(s) reviewed`;

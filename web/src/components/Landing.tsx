@@ -51,6 +51,7 @@ function Check({ state, children }: { state: "ok" | "bad" | "idle"; children: Re
  */
 export function Landing({ health, healthError, onRefresh }: Props) {
   const [waiting, setWaiting] = useState(false);
+  const [connectError, setConnectError] = useState<string | null>(null);
   const [base, setBase] = useState(getApiBase());
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -74,9 +75,20 @@ export function Landing({ health, healthError, onRefresh }: Props) {
     if (healthError) setWaiting(false);
   }, [healthError]);
 
-  function connect() {
+  async function connect() {
+    const popup = window.open("about:blank", "_blank");
+    if (popup) popup.opener = null;
+    setConnectError(null);
     setWaiting(true);
-    window.open(api.authUrl(), "_blank", "noopener,noreferrer");
+    try {
+      const { url } = await api.authUrl();
+      if (!popup) throw new Error("The browser blocked the Google sign-in tab. Allow pop-ups and try again.");
+      popup.location.replace(url);
+    } catch (error) {
+      popup?.close();
+      setWaiting(false);
+      setConnectError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   return (
@@ -91,31 +103,31 @@ export function Landing({ health, healthError, onRefresh }: Props) {
         <ul className="landing-points">
           <li>Finds applications, assessments, interviews, offers and rejections automatically</li>
           <li>Flags the ones that have gone quiet, so nothing sits forgotten</li>
-          <li>Reading and classification happen entirely on this machine</li>
+          <li>Uses read-only Gmail access and your configured backend</li>
         </ul>
 
         <ul className="checklist">
           <Check state={serverUp ? "ok" : "bad"}>
             {serverUp ? (
-              "Local server running"
+              "Backend reachable"
             ) : (
               <>
-                Local server not running — start it with <code>npm run dev:server</code>
+                Backend unreachable — check the address under Server settings
               </>
             )}
           </Check>
           <Check state={!serverUp ? "idle" : modelReady ? "ok" : "bad"}>
             {!serverUp ? (
-              "Local model"
+              "Classification model"
             ) : modelReady ? (
-              <>Local model {health?.ollama.model} ready</>
+              <>Model {health?.ollama.model} ready</>
             ) : !health?.ollama.reachable ? (
               <>
-                Ollama not running — start it with <code>ollama serve</code>
+                Ollama endpoint unreachable — check <code>OLLAMA_HOST</code>
               </>
             ) : (
               <>
-                Model missing — run <code>ollama pull {health.ollama.model}</code>
+                Configured model unavailable — check <code>OLLAMA_MODEL</code>
               </>
             )}
           </Check>
@@ -130,6 +142,7 @@ export function Landing({ health, healthError, onRefresh }: Props) {
 
         {needsReauth && health?.gmail.authError && <p className="notice notice-bad">{health.gmail.authError}</p>}
         {configError && <p className="notice notice-bad">{withLinks(configError)}</p>}
+        {connectError && <p className="notice notice-bad">{connectError}</p>}
 
         <button
           className="btn btn-primary btn-lg"
@@ -154,8 +167,7 @@ export function Landing({ health, healthError, onRefresh }: Props) {
           </p>
         ) : (
           <p className="muted small landing-foot">
-            Grants <strong>read-only</strong> access. This app cannot send, change, or delete anything, and
-            your email is never uploaded anywhere.
+            Grants <strong>read-only</strong> access. This app cannot send, change, or delete mail.
           </p>
         )}
 
@@ -191,7 +203,7 @@ export function Landing({ health, healthError, onRefresh }: Props) {
               </button>
             </div>
             <p className="muted small">
-              The server runs on your own machine. This page only needs to know where to reach it.
+              Enter the local or hosted backend URL this page should use.
             </p>
           </div>
         )}

@@ -5,7 +5,11 @@
 import http from "node:http";
 import { exec } from "node:child_process";
 import { config } from "../lib/config.ts";
-import { authUrl, oauthClient, saveToken } from "../lib/gmail.ts";
+import { initializeDatabase } from "../lib/db.ts";
+import { authUrl, consumeAuthState, initializeTokenStore, oauthClient, saveToken } from "../lib/gmail.ts";
+
+await initializeDatabase();
+await initializeTokenStore();
 
 const client = oauthClient();
 const url = new URL(config.google.redirectUri);
@@ -22,13 +26,17 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(400).end("No authorisation code returned.");
     return;
   }
+  if (!consumeAuthState(incoming.searchParams.get("state"))) {
+    res.writeHead(400).end("Invalid or expired OAuth state. Start again.");
+    return;
+  }
   try {
     const { tokens } = await client.getToken(code);
-    saveToken(tokens);
+    await saveToken(tokens);
     res.writeHead(200, { "Content-Type": "text/html" }).end(
       "<h1>Gmail connected</h1><p>You can close this tab.</p>",
     );
-    console.log(`\n  Token saved to ${config.tokenPath}\n`);
+    console.log("\n  Gmail credentials saved securely to the database.\n");
   } catch (err) {
     res.writeHead(500).end((err as Error).message);
     console.error(err);

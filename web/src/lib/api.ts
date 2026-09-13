@@ -4,8 +4,8 @@ const STORAGE_KEY = "jat.apiBase";
 const DEFAULT_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:4000";
 
 /**
- * The backend runs on the user's own machine, so its address cannot be baked
- * into a static build. It is configurable at runtime and remembered locally.
+ * A static build may use either a local or hosted backend. Its address is
+ * configurable at runtime and remembered locally.
  */
 export function getApiBase(): string {
   try {
@@ -99,11 +99,5 @@ export const api = {
   authStatus: () => request<{ required: boolean }>("/auth/status"),
   login: (password: string) =>
     request<{ token: string }>("/auth/login", { method: "POST", body: JSON.stringify({ password }) }),
-  authUrl: () => {
-    // window.open() navigates the browser directly, so it can't carry an
-    // Authorization header — the token rides along as a query param instead.
-    const token = getAuthToken();
-    const url = `${getApiBase()}/api/auth/start`;
-    return token ? `${url}?token=${encodeURIComponent(token)}` : url;
-  },
+  authUrl: () => request<{ url: string }>("/auth/start", { method: "POST" }),
 };

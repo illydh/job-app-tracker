@@ -1,13 +1,21 @@
-import fs from "node:fs";
-import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { google } from "googleapis";
 import type { gmail_v1 } from "googleapis";
 import type { OAuth2Client } from "google-auth-library";
 import { config } from "./config.ts";
+import {
+  currentTokenGeneration,
+  loadToken,
+  saveRefreshedToken,
+} from "./oauth-token-store.ts";
 import type { GmailMessage } from "./types.ts";
+
+export { deleteToken, hasToken, initializeTokenStore, loadToken, saveToken } from "./oauth-token-store.ts";
 
 /** Read-only: this app never sends, deletes, or modifies mail. */
 export const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
+const AUTH_STATE_TTL_MS = 10 * 60_000;
+const pendingAuthStates = new Map<string, number>();
 
 export function oauthClient(): OAuth2Client {
   if (!config.google.clientId || !config.google.clientSecret) {
@@ -19,37 +27,33 @@ export function oauthClient(): OAuth2Client {
 }
 
 export function authUrl(client: OAuth2Client): string {
+  const now = Date.now();
+  for (const [state, expiresAt] of pendingAuthStates) {
+    if (expiresAt <= now) pendingAuthStates.delete(state);
+  }
+  const state = randomBytes(32).toString("base64url");
+  pendingAuthStates.set(state, now + AUTH_STATE_TTL_MS);
   return client.generateAuthUrl({
     access_type: "offline",
     scope: SCOPES,
     // Force a refresh token even if the user has authorised this client before.
     prompt: "consent",
+    state,
   });
 }
 
-export function saveToken(tokens: unknown): void {
-  fs.mkdirSync(path.dirname(config.tokenPath), { recursive: true });
-  fs.writeFileSync(config.tokenPath, JSON.stringify(tokens, null, 2), { mode: 0o600 });
-}
-
-export function loadToken(): Record<string, unknown> | null {
-  if (!fs.existsSync(config.tokenPath)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(config.tokenPath, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-export function hasToken(): boolean {
-  const t = loadToken();
-  return Boolean(t && (t.refresh_token || t.access_token));
+/** Accept each state once, and only within the short OAuth round trip. */
+export function consumeAuthState(state: string | null): boolean {
+  if (!state) return false;
+  const expiresAt = pendingAuthStates.get(state);
+  pendingAuthStates.delete(state);
+  return expiresAt !== undefined && expiresAt > Date.now();
 }
 
 /* -------------------------------------------------------- auth liveness --- */
 
 /**
- * A cached token file proves nothing about whether Google still honours it.
+ * A stored token proves nothing about whether Google still honours it.
  *
  * Refresh tokens issued while the OAuth app is in "Testing" status expire after
  * 7 days, and a user can revoke access at any time. Both surface only when an
@@ -93,11 +97,20 @@ export function authorizedClient(): OAuth2Client | null {
     return null;
   }
   client.setCredentials(token);
+  const generation = currentTokenGeneration();
   // googleapis refreshes access tokens automatically; persist the new ones.
   // A successful refresh also means any previously recorded failure is stale.
   client.on("tokens", (fresh) => {
-    saveToken({ ...token, ...fresh });
-    clearAuthError();
+    void saveRefreshedToken(generation, { ...token, ...fresh })
+      .then((saved) => {
+        if (saved) clearAuthError();
+      })
+      .catch((error) => {
+        console.error(
+          "Could not persist refreshed Gmail credentials:",
+          error instanceof Error ? error.message : String(error),
+        );
+      });
   });
   return client;
 }

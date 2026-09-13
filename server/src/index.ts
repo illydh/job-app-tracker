@@ -1,7 +1,8 @@
 import cors from "cors";
 import express from "express";
 import { config } from "./lib/config.ts";
-import { hasToken } from "./lib/gmail.ts";
+import { closeDatabase, initializeDatabase } from "./lib/db.ts";
+import { hasToken, initializeTokenStore } from "./lib/gmail.ts";
 import { health } from "./lib/ollama.ts";
 import { startPeriodicSync } from "./lib/scheduler.ts";
 import { authRequired } from "./lib/session.ts";
@@ -10,7 +11,7 @@ import { api } from "./routes/api.ts";
 const app = express();
 
 /**
- * The GitHub Pages build calls this server on localhost, so its origin must be
+ * The static UI can call either a local or hosted API, so its origin must be
  * allow-listed explicitly. Requests without an Origin header (curl, the OAuth
  * redirect) are allowed; anything else must match ALLOWED_ORIGINS.
  */
@@ -32,10 +33,12 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
   res.status(status).json({ error: err.message });
 });
 
-app.listen(config.port, config.host, async () => {
+async function logStartup(): Promise<void> {
   const ollama = await health();
   console.log(`\n  Job Application Tracker API  →  http://localhost:${config.port}`);
-  console.log(`  Gmail    ${hasToken() ? "connected" : `not connected — open http://localhost:${config.port}/api/auth/start`}`);
+  console.log(
+    `  Gmail    ${hasToken() ? "connected" : "not connected — use Connect Gmail in the UI or run `npm run auth` while the server is stopped"}`,
+  );
   console.log(
     `  Ollama   ${
       !ollama.reachable
@@ -49,4 +52,19 @@ app.listen(config.port, config.host, async () => {
   console.log(`  Login    ${authRequired() ? "password required" : "disabled — set APP_PASSWORD in server/.env to require one"}`);
   startPeriodicSync();
   console.log();
+}
+
+async function start(): Promise<void> {
+  if (process.env.RENDER === "true" && config.appPassword.length < 16) {
+    throw new Error("APP_PASSWORD must contain at least 16 characters on Render.");
+  }
+  await initializeDatabase();
+  await initializeTokenStore();
+  app.listen(config.port, config.host, () => void logStartup());
+}
+
+void start().catch((error) => {
+  closeDatabase();
+  console.error("Startup failed:", error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
 });

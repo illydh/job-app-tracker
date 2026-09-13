@@ -4,7 +4,6 @@ import {
   type Request,
   type Response,
 } from "express";
-import fs from "node:fs";
 import { z } from "zod";
 import { config } from "../lib/config.ts";
 import * as store from "../lib/db.ts";
@@ -12,6 +11,8 @@ import {
   authUrl,
   authorizedClient,
   clearAuthError,
+  consumeAuthState,
+  deleteToken,
   fetchProfile,
   gmailAuthError,
   hasToken,
@@ -59,14 +60,6 @@ api.use((req, res, next) => {
     return;
   }
 
-  // A top-level `window.open()` navigation (used to kick off Gmail consent)
-  // cannot set an Authorization header, so this one route also accepts the
-  // token as a query param.
-  if (req.path === "/auth/start" && isValidToken(typeof req.query.token === "string" ? req.query.token : null)) {
-    next();
-    return;
-  }
-
   const header = req.header("authorization") ?? "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
   if (isValidToken(token)) {
@@ -108,8 +101,8 @@ function describeProfileError(err: unknown): string {
   return msg;
 }
 
-function cachedProfile(): GmailProfile | null {
-  const raw = store.getMeta(PROFILE_KEY);
+async function cachedProfile(): Promise<GmailProfile | null> {
+  const raw = await store.getMeta(PROFILE_KEY);
   if (!raw) return null;
   try {
     return JSON.parse(raw) as GmailProfile;
@@ -127,9 +120,9 @@ function cachedProfile(): GmailProfile | null {
  * every health poll.
  */
 async function resolveProfile(): Promise<GmailProfile | null> {
-  const cached = cachedProfile();
-  if (cached) return cached;
   if (!hasToken() || gmailAuthError()) return null;
+  const cached = await cachedProfile();
+  if (cached) return cached;
 
   // The UI polls health; without this a standing config fault would mean a
   // request to Google on every poll.
@@ -141,7 +134,7 @@ async function resolveProfile(): Promise<GmailProfile | null> {
   profileAttemptedAt = Date.now();
   try {
     const profile = await fetchProfile(client);
-    store.setMeta(PROFILE_KEY, JSON.stringify(profile));
+    await store.setMeta(PROFILE_KEY, JSON.stringify(profile));
     profileError = null;
     return profile;
   } catch (err) {
@@ -161,13 +154,17 @@ async function resolveProfile(): Promise<GmailProfile | null> {
 api.get(
   "/health",
   asyncRoute(async (_req, res) => {
-    const lastSync = store.getMeta("last_sync_at");
-    const profile = await resolveProfile();
+    const [lastSync, profile, model, databaseStats] = await Promise.all([
+      store.getMeta("last_sync_at"),
+      resolveProfile(),
+      ollamaHealth(),
+      store.stats(),
+    ]);
     const authProblem = gmailAuthError();
     res.json({
       ok: true,
       gmail: {
-        // A working profile is the real proof of connection; a token file alone
+        // A working profile is the real proof of connection; a stored token alone
         // may be expired or revoked.
         connected: Boolean(profile) && !authProblem,
         needsReauth: Boolean(authProblem),
@@ -176,8 +173,8 @@ api.get(
         profile,
         syncSince: config.syncSince,
       },
-      ollama: await ollamaHealth(),
-      stats: store.stats(),
+      ollama: model,
+      stats: databaseStats,
       lastSyncAt: lastSync ? Number(lastSync) : null,
       syncing: isSyncing(),
     });
@@ -217,11 +214,11 @@ api.post(
   }),
 );
 
-api.get("/auth/start", (_req, res) => {
+api.post("/auth/start", (_req, res) => {
   try {
-    res.redirect(authUrl(oauthClient()));
+    res.json({ url: authUrl(oauthClient()) });
   } catch (err) {
-    res.status(500).send((err as Error).message);
+    res.status(500).json({ error: (err as Error).message });
   }
 });
 
@@ -229,22 +226,27 @@ api.get(
   "/auth/callback",
   asyncRoute(async (req, res) => {
     const code = typeof req.query.code === "string" ? req.query.code : null;
+    const state = typeof req.query.state === "string" ? req.query.state : null;
     if (!code) {
       res
         .status(400)
         .send(page("Authorisation failed", "No code was returned by Google."));
       return;
     }
+    if (!consumeAuthState(state)) {
+      res.status(400).send(page("Authorisation failed", "The OAuth request is invalid or expired. Start again."));
+      return;
+    }
     try {
       const client = oauthClient();
       const { tokens } = await client.getToken(code);
-      saveToken(tokens);
+      await saveToken(tokens);
       clearAuthError();
 
       const authed = authorizedClient();
       if (authed) {
         try {
-          store.setMeta(
+          await store.setMeta(
             PROFILE_KEY,
             JSON.stringify(await fetchProfile(authed)),
           );
@@ -269,13 +271,16 @@ api.get(
   }),
 );
 
-api.post("/auth/disconnect", (_req, res) => {
-  if (fs.existsSync(config.tokenPath)) fs.unlinkSync(config.tokenPath);
-  store.setMeta(PROFILE_KEY, "");
-  clearAuthError();
-  profileError = null;
-  res.json({ connected: false });
-});
+api.post(
+  "/auth/disconnect",
+  asyncRoute(async (_req, res) => {
+    await deleteToken();
+    await store.setMeta(PROFILE_KEY, "");
+    clearAuthError();
+    profileError = null;
+    res.json({ connected: false });
+  }),
+);
 
 /** Minimal standalone HTML for the two OAuth redirect landings. */
 function page(title: string, body: string): string {
@@ -309,12 +314,11 @@ api.get("/sync", (_req, res) => {
 
 /* ---------------------------------------------------------- applications --- */
 
-api.get("/applications", (_req, res) => {
-  const now = Date.now();
-  const apps = store.listApplications().map((app) => {
-    const events = store.listEvents(app.id);
-    const latest = events[0];
-    return {
+api.get(
+  "/applications",
+  asyncRoute(async (_req, res) => {
+    const now = Date.now();
+    const apps = (await store.listApplicationSummaries()).map((app) => ({
       id: app.id,
       company: app.company,
       role: app.role,
@@ -326,70 +330,76 @@ api.get("/applications", (_req, res) => {
       lastEventAt: app.last_event_at,
       daysSinceLastEvent: daysSince(app.last_event_at, now),
       notes: app.notes,
-      eventCount: events.length,
-      latestSummary: latest?.summary ?? null,
-    };
-  });
-  res.json({ applications: apps, ghostAfterDays: config.ghostAfterDays });
-});
+      eventCount: app.event_count,
+      latestSummary: app.latest_summary,
+    }));
+    res.json({ applications: apps, ghostAfterDays: config.ghostAfterDays });
+  }),
+);
 
-api.get("/applications/:id/events", (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id)) {
-    res.status(400).json({ error: "Invalid id" });
-    return;
-  }
-  res.json({
-    events: store.listEvents(id).map((e) => ({
-      id: e.id,
-      status: e.status,
-      confidence: e.confidence,
-      summary: e.summary,
-      subject: e.subject,
-      from: e.from_addr,
-      occurredAt: e.occurred_at,
-    })),
-  });
-});
+api.get(
+  "/applications/:id/events",
+  asyncRoute(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    res.json({
+      events: (await store.listEvents(id)).map((e) => ({
+        id: e.id,
+        status: e.status,
+        confidence: e.confidence,
+        summary: e.summary,
+        subject: e.subject,
+        from: e.from_addr,
+        occurredAt: e.occurred_at,
+      })),
+    });
+  }),
+);
 
 const PatchSchema = z.object({
   status: z.enum(STATUSES).optional(),
   notes: z.string().max(4000).optional(),
 });
 
-api.patch("/applications/:id", (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id)) {
-    res.status(400).json({ error: "Invalid id" });
-    return;
-  }
-  const parsed = PatchSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res
-      .status(400)
-      .json({ error: parsed.error.issues.map((i) => i.message).join("; ") });
-    return;
-  }
+api.patch(
+  "/applications/:id",
+  asyncRoute(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const parsed = PatchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues.map((i) => i.message).join("; ") });
+      return;
+    }
 
-  let row;
-  if (parsed.data.status) row = store.setStatus(id, parsed.data.status);
-  if (parsed.data.notes !== undefined)
-    row = store.setNotes(id, parsed.data.notes);
-  if (!row) {
-    res.status(404).json({ error: "Application not found" });
-    return;
-  }
-  res.json({ application: { ...row, stage: deriveStage(row) } });
-});
+    let row;
+    if (parsed.data.status) row = await store.setStatus(id, parsed.data.status);
+    if (parsed.data.notes !== undefined) row = await store.setNotes(id, parsed.data.notes);
+    if (!row) {
+      res.status(404).json({ error: "Application not found" });
+      return;
+    }
+    res.json({ application: { ...row, stage: deriveStage(row) } });
+  }),
+);
 
-api.delete("/applications/:id", (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id)) {
-    res.status(400).json({ error: "Invalid id" });
-    return;
-  }
-  res.json({ deleted: store.deleteApplication(id) });
-});
+api.delete(
+  "/applications/:id",
+  asyncRoute(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    res.json({ deleted: await store.deleteApplication(id) });
+  }),
+);
 
 /* ------------------------------------------------------------ duplicates --- */
 
@@ -440,36 +450,46 @@ api.get(
 );
 
 /** Fold another application into this one; this one survives. */
-api.post("/applications/:id/merge", (req, res) => {
-  const id = applicationId(req, res);
-  if (id === null) return;
-  const source = otherId(req, res);
-  if (source === null) return;
+api.post(
+  "/applications/:id/merge",
+  asyncRoute(async (req, res) => {
+    const id = applicationId(req, res);
+    if (id === null) return;
+    const source = otherId(req, res);
+    if (source === null) return;
 
-  if (source === id) {
-    res.status(400).json({ error: "An application cannot be merged into itself" });
-    return;
-  }
+    if (source === id) {
+      res.status(400).json({ error: "An application cannot be merged into itself" });
+      return;
+    }
 
-  const row = store.mergeApplications(id, source);
-  if (!row) {
-    res.status(404).json({ error: "Application not found" });
-    return;
-  }
-  res.json({ application: { ...row, stage: deriveStage(row) } });
-});
+    const row = await store.mergeApplications(id, source);
+    if (!row) {
+      res.status(404).json({ error: "Application not found" });
+      return;
+    }
+    res.json({ application: { ...row, stage: deriveStage(row) } });
+  }),
+);
 
 /** Remember that these two are different, so the suggestion never returns. */
-api.post("/applications/:id/dismiss-similar", (req, res) => {
-  const id = applicationId(req, res);
-  if (id === null) return;
-  const other = otherId(req, res);
-  if (other === null) return;
+api.post(
+  "/applications/:id/dismiss-similar",
+  asyncRoute(async (req, res) => {
+    const id = applicationId(req, res);
+    if (id === null) return;
+    const other = otherId(req, res);
+    if (other === null) return;
 
-  if (!store.getApplication(id) || !store.getApplication(other)) {
-    res.status(404).json({ error: "Application not found" });
-    return;
-  }
-  store.dismissPair(id, other);
-  res.json({ dismissed: true });
-});
+    const [application, comparison] = await Promise.all([
+      store.getApplication(id),
+      store.getApplication(other),
+    ]);
+    if (!application || !comparison) {
+      res.status(404).json({ error: "Application not found" });
+      return;
+    }
+    await store.dismissPair(id, other);
+    res.json({ dismissed: true });
+  }),
+);
