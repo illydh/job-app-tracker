@@ -55,7 +55,7 @@ async function logStartup(): Promise<void> {
 }
 
 async function start(): Promise<void> {
-  if (process.env.RENDER === "true" && config.appPassword.length < 16) {
+  if (process.env.RENDER === "true") {
     throw new Error("APP_PASSWORD must contain at least 16 characters on Render.");
   }
   await initializeDatabase();
