@@ -68,7 +68,7 @@ export const config = {
 
   gemini: {
     apiKey: process.env.GEMINI_API_KEY?.trim() ?? "",
-    model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash-lite",
+    model: process.env.GEMINI_MODEL ?? "gemini-3.5-flash-lite",
     timeoutMs: int("GEMINI_TIMEOUT_MS", 30_000),
   },
 

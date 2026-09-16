@@ -63,7 +63,7 @@ npm install
 
 Create a free key at [Google AI Studio](https://aistudio.google.com/apikey) —
 no credit card required. Set it as `GEMINI_API_KEY` in `server/.env` (step 4).
-`GEMINI_MODEL` defaults to `gemini-2.5-flash-lite`; any Gemini model your key
+`GEMINI_MODEL` defaults to `gemini-3.5-flash-lite`; any Gemini model your key
 can access will work. Verify a swap against the sample emails before trusting
 it on your inbox:
 
@@ -179,8 +179,6 @@ Sync time is dominated by how many emails clear the keyword gate and Gemini's
 free-tier rate limit, not by how many you have. A first run over a month of
 mail typically takes a few minutes; later runs only look at what is new.
 
-Thinking is switched **off** (`thinkingBudget: 0`) — extraction gains nothing
-from it and it costs seconds per email.
 
 ### Stages
 

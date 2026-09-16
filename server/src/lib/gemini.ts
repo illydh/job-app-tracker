@@ -86,7 +86,7 @@ export async function health(): Promise<GeminiHealth> {
       return { reachable: false, model: config.gemini.model, modelAvailable: false, models: [], error: `HTTP ${res.status}` };
     }
     const data = (await res.json()) as { models?: { name: string }[] };
-    // Gemini lists models as "models/gemini-2.5-flash-lite"; the configured
+    // Gemini lists models as "models/gemini-3.5-flash-lite"; the configured
     // name is bare, so strip the prefix before comparing.
     const models = (data.models ?? []).map((m) => m.name.replace(/^models\//, ""));
     const modelAvailable = models.includes(config.gemini.model);
@@ -125,9 +125,6 @@ async function chatJson(
         temperature: 0,
         responseMimeType: "application/json",
         responseSchema: schema,
-        // Extraction gains nothing from reasoning and it costs seconds per
-        // email — same rationale as disabling `think` on a local model.
-        thinkingConfig: { thinkingBudget: 0 },
       },
     }),
     signal: opts.signal
