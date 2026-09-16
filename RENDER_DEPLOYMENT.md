@@ -53,7 +53,7 @@ GOOGLE_CLIENT_SECRET=<Google OAuth web client secret>
 GOOGLE_REDIRECT_URI=https://<your-render-hostname>/api/auth/callback
 
 ALLOWED_ORIGINS=https://<your-username>.github.io
-APP_PASSWORD=<strong unique password, at least 16 characters>
+APP_PASSWORD=<strong unique password>
 
 SYNC_SINCE=2026-08-01
 MAX_MESSAGES_PER_SYNC=400
