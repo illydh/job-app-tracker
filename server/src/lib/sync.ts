@@ -1,7 +1,7 @@
 import { config } from "./config.ts";
 import * as store from "./db.ts";
 import { authorizedClient, effectiveSyncSince, fetchMessages, isAuthError, listMessageIds, noteAuthError } from "./gmail.ts";
-import { classify, health } from "./ollama.ts";
+import { classify, health } from "./gemini.ts";
 import { prefilter } from "./prefilter.ts";
 
 export type SyncPhase = "idle" | "fetching" | "classifying" | "done" | "error";
@@ -67,12 +67,12 @@ export async function runSync(): Promise<SyncProgress> {
     const client = authorizedClient();
     if (!client) throw new Error("Not connected to Gmail. Use Connect Gmail in the UI or run `npm run auth`.");
 
-    const ollama = await health();
-    if (!ollama.reachable) {
-      throw new Error(`Cannot reach Ollama at ${config.ollama.host}. Is \`ollama serve\` running?`);
+    const gemini = await health();
+    if (!gemini.reachable) {
+      throw new Error(`Cannot reach Gemini: ${gemini.error ?? "check GEMINI_API_KEY"}`);
     }
-    if (!ollama.modelAvailable) {
-      throw new Error(`Model "${ollama.model}" is not pulled. Run: ollama pull ${ollama.model}`);
+    if (!gemini.modelAvailable) {
+      throw new Error(`Model "${gemini.model}" is not available for this API key. Check GEMINI_MODEL.`);
     }
 
     /* ------------------------------------------------- fetch new messages --- */

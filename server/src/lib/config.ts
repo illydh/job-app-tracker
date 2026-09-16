@@ -66,19 +66,10 @@ export const config = {
   /** Auto-sync cadence once the server is running unattended. 0 disables it. */
   syncIntervalMinutes: int("SYNC_INTERVAL_MINUTES", 30),
 
-  ollama: {
-    host: process.env.OLLAMA_HOST ?? "http://localhost:11434",
-    model: process.env.OLLAMA_MODEL ?? "qwen3.5:4b",
-    timeoutMs: int("OLLAMA_TIMEOUT_MS", 120_000),
-    /**
-     * Hybrid reasoning models (Qwen3.x and friends) think before answering.
-     * Extraction does not benefit from it and it costs seconds per email.
-     *
-     * Left `undefined` unless explicitly set, so the field is omitted from the
-     * request entirely — Ollama rejects an explicit `think` on models that do
-     * not support it.
-     */
-    think: process.env.OLLAMA_THINK === undefined ? undefined : process.env.OLLAMA_THINK === "true",
+  gemini: {
+    apiKey: process.env.GEMINI_API_KEY?.trim() ?? "",
+    model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash-lite",
+    timeoutMs: int("GEMINI_TIMEOUT_MS", 30_000),
   },
 
   /** Days of silence after which an open application is shown as ghosted. */

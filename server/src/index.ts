@@ -3,7 +3,7 @@ import express from "express";
 import { config } from "./lib/config.ts";
 import { closeDatabase, initializeDatabase } from "./lib/db.ts";
 import { hasToken, initializeTokenStore } from "./lib/gmail.ts";
-import { health } from "./lib/ollama.ts";
+import { health } from "./lib/gemini.ts";
 import { startPeriodicSync } from "./lib/scheduler.ts";
 import { authRequired } from "./lib/session.ts";
 import { api } from "./routes/api.ts";
@@ -34,18 +34,18 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 });
 
 async function logStartup(): Promise<void> {
-  const ollama = await health();
+  const gemini = await health();
   console.log(`\n  Job Application Tracker API  →  http://localhost:${config.port}`);
   console.log(
     `  Gmail    ${hasToken() ? "connected" : "not connected — use Connect Gmail in the UI or run `npm run auth` while the server is stopped"}`,
   );
   console.log(
-    `  Ollama   ${
-      !ollama.reachable
-        ? `unreachable at ${config.ollama.host} — run \`ollama serve\``
-        : ollama.modelAvailable
-          ? `${ollama.model} ready`
-          : `model not pulled — run \`ollama pull ${ollama.model}\``
+    `  Gemini   ${
+      !gemini.reachable
+        ? `unreachable — ${gemini.error ?? "check GEMINI_API_KEY"}`
+        : gemini.modelAvailable
+          ? `${gemini.model} ready`
+          : `model "${gemini.model}" not available — check GEMINI_MODEL`
     }`,
   );
   console.log(`  Window   emails since ${config.syncSince}`);

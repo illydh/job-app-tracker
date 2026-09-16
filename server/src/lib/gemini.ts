@@ -2,23 +2,22 @@ import { z } from "zod";
 import { config } from "./config.ts";
 import { STATUSES, type Classification, type GmailMessage, type Status } from "./types.ts";
 
+const API_ROOT = "https://generativelanguage.googleapis.com/v1beta";
+
 /**
- * JSON schema handed to Ollama for constrained decoding, so the model is
- * physically unable to emit malformed JSON or an out-of-taxonomy status.
- *
- * Nullable fields are modelled as plain strings with a sentinel ("" / "none")
- * rather than `["string","null"]` unions: llama.cpp's grammar conversion handles
- * flat types far more reliably than unions.
+ * Gemini's Schema type uses uppercase type names (OBJECT, STRING, ...), unlike
+ * plain JSON Schema — this is the REST wire format for `responseSchema`, not a
+ * dialect choice.
  */
 const RESPONSE_SCHEMA = {
-  type: "object",
+  type: "OBJECT",
   properties: {
-    is_job_application: { type: "boolean" },
-    company: { type: "string" },
-    role: { type: "string" },
-    status: { type: "string", enum: [...STATUSES, "none"] },
-    confidence: { type: "number" },
-    summary: { type: "string" },
+    is_job_application: { type: "BOOLEAN" },
+    company: { type: "STRING" },
+    role: { type: "STRING" },
+    status: { type: "STRING", enum: [...STATUSES, "none"] },
+    confidence: { type: "NUMBER" },
+    summary: { type: "STRING" },
   },
   required: ["is_job_application", "company", "role", "status", "confidence", "summary"],
 } as const;
@@ -66,7 +65,7 @@ function buildUserPrompt(msg: GmailMessage): string {
   ].join("\n");
 }
 
-export interface OllamaHealth {
+export interface GeminiHealth {
   reachable: boolean;
   model: string;
   modelAvailable: boolean;
@@ -74,55 +73,28 @@ export interface OllamaHealth {
   error?: string;
 }
 
-/**
- * Whether the configured model reasons before answering, cached for the process.
- *
- * This matters a lot: a reasoning model spends hundreds of tokens deliberating
- * about an email before emitting the JSON, which on a 4B model turns a
- * sub-second extraction into a ten-second one and can blow the request timeout
- * outright. Extraction gains nothing from it, so thinking is switched off when
- * the model supports it.
- *
- * It has to be detected rather than assumed: Ollama rejects an explicit `think`
- * on models that cannot think, so the field must be omitted for those.
- */
-let thinkingCapable: boolean | null = null;
-
-async function supportsThinking(): Promise<boolean> {
-  if (thinkingCapable !== null) return thinkingCapable;
-  try {
-    const res = await fetch(`${config.ollama.host}/api/show`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: config.ollama.model }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) return (thinkingCapable = false);
-    const data = (await res.json()) as { capabilities?: string[] };
-    return (thinkingCapable = (data.capabilities ?? []).includes("thinking"));
-  } catch {
-    // Unknown: omit the field rather than risk rejecting every request.
-    return (thinkingCapable = false);
+export async function health(): Promise<GeminiHealth> {
+  if (!config.gemini.apiKey) {
+    return { reachable: false, model: config.gemini.model, modelAvailable: false, models: [], error: "GEMINI_API_KEY is not set" };
   }
-}
-
-export async function health(): Promise<OllamaHealth> {
   try {
-    const res = await fetch(`${config.ollama.host}/api/tags`, { signal: AbortSignal.timeout(5000) });
+    const res = await fetch(`${API_ROOT}/models`, {
+      headers: { "x-goog-api-key": config.gemini.apiKey },
+      signal: AbortSignal.timeout(5000),
+    });
     if (!res.ok) {
-      return { reachable: false, model: config.ollama.model, modelAvailable: false, models: [], error: `HTTP ${res.status}` };
+      return { reachable: false, model: config.gemini.model, modelAvailable: false, models: [], error: `HTTP ${res.status}` };
     }
     const data = (await res.json()) as { models?: { name: string }[] };
-    const models = (data.models ?? []).map((m) => m.name);
-    // Ollama reports tags as "name:tag"; accept a bare name as a match too.
-    const modelAvailable = models.some(
-      (m) => m === config.ollama.model || m.split(":")[0] === config.ollama.model.split(":")[0],
-    );
-    return { reachable: true, model: config.ollama.model, modelAvailable, models };
+    // Gemini lists models as "models/gemini-2.5-flash-lite"; the configured
+    // name is bare, so strip the prefix before comparing.
+    const models = (data.models ?? []).map((m) => m.name.replace(/^models\//, ""));
+    const modelAvailable = models.includes(config.gemini.model);
+    return { reachable: true, model: config.gemini.model, modelAvailable, models };
   } catch (err) {
     return {
       reachable: false,
-      model: config.ollama.model,
+      model: config.gemini.model,
       modelAvailable: false,
       models: [],
       error: (err as Error).message,
@@ -130,55 +102,33 @@ export async function health(): Promise<OllamaHealth> {
   }
 }
 
-/**
- * The schema constrains decoding, so `content` is normally clean JSON. This is
- * belt-and-braces for reasoning models, whose thinking can bleed into the
- * content field on some Ollama builds: drop any <think> block, then take the
- * outermost object.
- */
-function extractJson(raw: string): string {
-  const withoutThinking = raw.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
-  const start = withoutThinking.indexOf("{");
-  const end = withoutThinking.lastIndexOf("}");
-  if (start === -1 || end <= start) return withoutThinking;
-  return withoutThinking.slice(start, end + 1);
+interface GenerateContentResponse {
+  candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
+  promptFeedback?: { blockReason?: string };
 }
 
-/**
- * Shared by every caller, deliberately: Ollama keeps a model resident against
- * one context size and reloads it — several seconds — whenever a request asks
- * for a different one, so two callers with two window sizes would thrash the
- * model in and out on every alternation. Covers the system prompt plus a
- * trimmed email with room to spare.
- */
-const NUM_CTX = 4096;
-
-/** One schema-constrained, deterministic exchange with the local model. */
+/** One schema-constrained, deterministic exchange with Gemini. */
 async function chatJson(
   system: string,
   user: string,
   schema: unknown,
   opts: { timeoutMs: number; signal?: AbortSignal },
 ): Promise<unknown> {
-  // `think` is only meaningful — and only accepted — on capable models.
-  const canThink = await supportsThinking();
-  const think = canThink ? (config.ollama.think ?? false) : undefined;
-
-  const res = await fetch(`${config.ollama.host}/api/chat`, {
+  const res = await fetch(`${API_ROOT}/models/${config.gemini.model}:generateContent`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "x-goog-api-key": config.gemini.apiKey },
     body: JSON.stringify({
-      model: config.ollama.model,
-      stream: false,
-      format: schema,
-      // Deterministic: this is extraction, not writing.
-      options: { temperature: 0, num_ctx: NUM_CTX },
-      // Omitted entirely when undefined — JSON.stringify drops undefined.
-      think,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
+      systemInstruction: { parts: [{ text: system }] },
+      contents: [{ role: "user", parts: [{ text: user }] }],
+      generationConfig: {
+        // Deterministic: this is extraction, not writing.
+        temperature: 0,
+        responseMimeType: "application/json",
+        responseSchema: schema,
+        // Extraction gains nothing from reasoning and it costs seconds per
+        // email — same rationale as disabling `think` on a local model.
+        thinkingConfig: { thinkingBudget: 0 },
+      },
     }),
     signal: opts.signal
       ? AbortSignal.any([AbortSignal.timeout(opts.timeoutMs), opts.signal])
@@ -186,24 +136,27 @@ async function chatJson(
   });
 
   if (!res.ok) {
-    throw new Error(`Ollama returned HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    throw new Error(`Gemini returned HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
   }
 
-  const payload = (await res.json()) as { message?: { content?: string } };
-  const raw = payload.message?.content?.trim() ?? "";
-  if (!raw) throw new Error("Ollama returned an empty response");
+  const payload = (await res.json()) as GenerateContentResponse;
+  const raw = payload.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
+  if (!raw) {
+    const reason = payload.promptFeedback?.blockReason ?? payload.candidates?.[0]?.finishReason ?? "empty response";
+    throw new Error(`Gemini returned no usable content (${reason})`);
+  }
 
-  return JSON.parse(extractJson(raw));
+  return JSON.parse(raw);
 }
 
 export async function classify(msg: GmailMessage): Promise<Classification> {
   const parsed = ResponseSchema.safeParse(
     await chatJson(SYSTEM_PROMPT, buildUserPrompt(msg), RESPONSE_SCHEMA, {
-      timeoutMs: config.ollama.timeoutMs,
+      timeoutMs: config.gemini.timeoutMs,
     }),
   );
   if (!parsed.success) {
-    throw new Error(`Ollama response failed validation: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
+    throw new Error(`Gemini response failed validation: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
   }
 
   const d = parsed.data;
@@ -228,11 +181,11 @@ export async function classify(msg: GmailMessage): Promise<Classification> {
 /* ------------------------------------------------------ duplicate judging --- */
 
 const DUPLICATE_SCHEMA = {
-  type: "object",
+  type: "OBJECT",
   properties: {
-    same_application: { type: "boolean" },
-    confidence: { type: "number" },
-    reason: { type: "string" },
+    same_application: { type: "BOOLEAN" },
+    confidence: { type: "NUMBER" },
+    reason: { type: "STRING" },
   },
   required: ["same_application", "confidence", "reason"],
 } as const;
@@ -284,12 +237,12 @@ export async function judgeDuplicate(
     await chatJson(DUPLICATE_PROMPT, `Entry A\n${describe(a)}\n\nEntry B\n${describe(b)}`, DUPLICATE_SCHEMA, {
       // Someone is waiting on this, unlike a sync. Give up early rather than
       // holding a request open for two minutes.
-      timeoutMs: Math.min(config.ollama.timeoutMs, 30_000),
+      timeoutMs: Math.min(config.gemini.timeoutMs, 30_000),
       signal,
     }),
   );
   if (!parsed.success) {
-    throw new Error(`Ollama duplicate check failed validation: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
+    throw new Error(`Gemini duplicate check failed validation: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
   }
 
   return {

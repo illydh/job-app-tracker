@@ -71,7 +71,7 @@ export interface Health {
     profile: GmailProfile | null;
     syncSince: string;
   };
-  ollama: { reachable: boolean; model: string; modelAvailable: boolean; models: string[]; error?: string };
+  gemini: { reachable: boolean; model: string; modelAvailable: boolean; models: string[]; error?: string };
   stats: { messages: number; pending: number; prefiltered: number; classified: number; applications: number; events: number };
   lastSyncAt: number | null;
   syncing: boolean;

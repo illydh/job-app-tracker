@@ -56,7 +56,7 @@ export function Landing({ health, healthError, onRefresh }: Props) {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const serverUp = Boolean(health) && !healthError;
-  const modelReady = Boolean(health?.ollama.reachable && health.ollama.modelAvailable);
+  const modelReady = Boolean(health?.gemini.reachable && health.gemini.modelAvailable);
   const needsReauth = Boolean(health?.gmail.needsReauth);
   // A setup fault that reconnecting cannot fix — offering consent again would
   // just loop the user, so the CTA steps aside for the instruction.
@@ -120,14 +120,14 @@ export function Landing({ health, healthError, onRefresh }: Props) {
             {!serverUp ? (
               "Classification model"
             ) : modelReady ? (
-              <>Model {health?.ollama.model} ready</>
-            ) : !health?.ollama.reachable ? (
+              <>Model {health?.gemini.model} ready</>
+            ) : !health?.gemini.reachable ? (
               <>
-                Ollama endpoint unreachable — check <code>OLLAMA_HOST</code>
+                Gemini unreachable — check <code>GEMINI_API_KEY</code>
               </>
             ) : (
               <>
-                Configured model unavailable — check <code>OLLAMA_MODEL</code>
+                Configured model unavailable — check <code>GEMINI_MODEL</code>
               </>
             )}
           </Check>

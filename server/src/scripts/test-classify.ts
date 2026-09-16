@@ -4,7 +4,7 @@
  *
  *   npm run test:classify --workspace server
  */
-import { classify, health } from "../lib/ollama.ts";
+import { classify, health } from "../lib/gemini.ts";
 import { prefilter } from "../lib/prefilter.ts";
 import { companyKey } from "../lib/db.ts";
 import type { GmailMessage, Status } from "../lib/types.ts";
@@ -109,11 +109,11 @@ const FIXTURES: Fixture[] = [
 
 const h = await health();
 if (!h.reachable) {
-  console.error(`\n  Ollama is not reachable at its configured host. Run \`ollama serve\`.\n`);
+  console.error(`\n  Gemini is not reachable: ${h.error ?? "check GEMINI_API_KEY"}\n`);
   process.exit(1);
 }
 if (!h.modelAvailable) {
-  console.error(`\n  Model "${h.model}" is not pulled. Run: ollama pull ${h.model}\n`);
+  console.error(`\n  Model "${h.model}" is not available for this API key. Check GEMINI_MODEL.\n`);
   process.exit(1);
 }
 

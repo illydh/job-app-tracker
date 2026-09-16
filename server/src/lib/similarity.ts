@@ -1,5 +1,5 @@
 import * as store from "./db.ts";
-import { judgeDuplicate } from "./ollama.ts";
+import { judgeDuplicate } from "./gemini.ts";
 import type { ApplicationRow } from "./types.ts";
 
 /**
@@ -14,7 +14,7 @@ import type { ApplicationRow } from "./types.ts";
  * Three signals, cheapest first:
  *   1. a shared Gmail thread, which is near-proof and costs one join;
  *   2. lexical similarity of the normalised company and role keys;
- *   3. the local model, but only for pairs (2) leaves genuinely ambiguous.
+ *   3. Gemini, but only for pairs (2) leaves genuinely ambiguous.
  *
  * Only (3) is slow, so it is bounded per request and its verdicts are cached.
  */
@@ -117,7 +117,7 @@ function shareAny<T>(a: Set<T>, b: Set<T>): boolean {
   return overlapCount(a, b) > 0;
 }
 
-/** Ollama being down should not print a line per click. */
+/** Gemini being down should not print a line per click. */
 let lastWarnedAt = 0;
 
 function warnOnce(message: string): void {
@@ -130,7 +130,7 @@ function warnOnce(message: string): void {
  * Every application that looks like a duplicate of `id`, best match first.
  *
  * Pairs the user has already rejected are never returned again, and a failing
- * or absent Ollama degrades to the lexical signals rather than erroring: a
+ * or absent Gemini degrades to the lexical signals rather than erroring: a
  * duplicate suggestion is a nicety, and must never break opening a card.
  *
  * `signal` aborts the adjudication when the caller stops caring — clicking

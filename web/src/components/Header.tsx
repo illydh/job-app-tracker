@@ -36,7 +36,7 @@ export function Header({
   onLogout,
 }: Props) {
   const gmailOk = Boolean(health?.gmail.connected);
-  const modelOk = Boolean(health?.ollama.reachable && health.ollama.modelAvailable);
+  const modelOk = Boolean(health?.gemini.reachable && health.gemini.modelAvailable);
   const canSync = gmailOk && modelOk && !syncing;
 
   return (
@@ -88,11 +88,11 @@ export function Header({
             <Pill
               ok={modelOk}
               label={
-                !health?.ollama.reachable
-                  ? "Ollama offline"
-                  : health.ollama.modelAvailable
-                    ? `Model ${health.ollama.model}`
-                    : `Model ${health.ollama.model} not pulled`
+                !health?.gemini.reachable
+                  ? "Gemini unreachable"
+                  : health.gemini.modelAvailable
+                    ? `Model ${health.gemini.model}`
+                    : `Model ${health.gemini.model} unavailable`
               }
             />
             {health?.lastSyncAt && (

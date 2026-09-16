@@ -58,9 +58,9 @@ APP_PASSWORD=<strong unique password>
 SYNC_SINCE=2026-08-01
 MAX_MESSAGES_PER_SYNC=400
 SYNC_INTERVAL_MINUTES=30
-OLLAMA_HOST=<Ollama-compatible endpoint reachable from Render>
-OLLAMA_MODEL=qwen3.5:4b
-OLLAMA_TIMEOUT_MS=120000
+GEMINI_API_KEY=<free key from https://aistudio.google.com/apikey>
+GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_TIMEOUT_MS=30000
 MIN_CONFIDENCE=0.6
 GHOST_AFTER_DAYS=30
 ```
@@ -152,12 +152,11 @@ allowance includes 5 GB storage, 500 million row reads, and 10 million row
 writes per month, which is ample for a single-user tracker; monitor both
 providers' usage dashboards because plan limits can change.
 
-The database migration does not solve model hosting. `OLLAMA_HOST=localhost`
-cannot reach an Ollama process on your computer from Render. Sync remains
-blocked until `OLLAMA_HOST` points to a reachable Ollama-compatible service;
-that is a separate deployment step.
+Model hosting is the Gemini API, not a local process, so it is reachable from
+Render without any extra deployment step — just set `GEMINI_API_KEY`.
 
 References: [Render free-service limits](https://render.com/docs/free),
-[Render web-service binding](https://render.com/docs/web-services), and
+[Render web-service binding](https://render.com/docs/web-services),
 [Turso TypeScript client reference](https://docs.turso.tech/sdk/ts/reference),
-[Turso pricing](https://turso.tech/pricing).
+[Turso pricing](https://turso.tech/pricing), and
+[Gemini API free tier](https://ai.google.dev/gemini-api/docs/pricing).

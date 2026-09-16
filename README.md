@@ -4,13 +4,13 @@ A self-hosted tool that reads your Gmail, uses an LLM to identify
 job-application emails, and tracks each application through its interview
 stage on a simple board.
 
-Local development remains entirely local: email is fetched read-only,
-classified by Ollama on localhost, and stored in a SQLite file. The backend can
-also run on Render with Turso for persistent storage; that hosted mode sends
-stored message data to those services. See [the deployment guide](RENDER_DEPLOYMENT.md).
+Email is fetched read-only and stored in a SQLite file locally, or Turso when
+configured. Classification always calls the Gemini API — even in local
+development, email content is sent to Google for classification. See
+[the deployment guide](RENDER_DEPLOYMENT.md) and [Privacy](#privacy) below.
 
 This is a personal, MVP-stage project rather than a polished product. It
-requires a Gmail OAuth client and a running Ollama instance to be useful — see
+requires a Gmail OAuth client and a Gemini API key to be useful — see
 [Setup](#setup) below before deciding if it's worth the install. Known gaps
 are listed under [Not in the MVP](#not-in-the-mvp).
 
@@ -19,7 +19,7 @@ are listed under [Not in the MVP](#not-in-the-mvp).
 ## How it is put together
 
 ```
-Gmail API ──▶ SQLite/Turso ──▶ keyword gate ──▶ Ollama ──▶ applications + events
+Gmail API ──▶ SQLite/Turso ──▶ keyword gate ──▶ Gemini ──▶ applications + events
   (read-only)   (storage)       (free, fast)    (model)          │
                                                            ▼
                                             React UI (GitHub Pages or localhost)
@@ -29,7 +29,7 @@ Gmail API ──▶ SQLite/Turso ──▶ keyword gate ──▶ Ollama ──�
 | --- | --- | --- |
 | Backend | Node + Express + TypeScript | Runs natively via `--experimental-strip-types`; no build step in dev |
 | Storage | libSQL (`@libsql/client`) | Local SQLite by default; Turso when configured |
-| Model | Ollama, JSON-schema constrained | Local by default; the schema makes malformed output impossible |
+| Model | Gemini API, JSON-schema constrained | Free tier, no local hardware needed; the schema makes malformed output impossible |
 | Frontend | React + TypeScript + Vite | Static build, deployable to Pages |
 
 ### A note on GitHub Pages
@@ -59,21 +59,17 @@ Alternatively, point the frontend at a Render-hosted backend as described in
 npm install
 ```
 
-### 2. Pull a model
+### 2. Get a Gemini API key
 
-```bash
-ollama pull qwen3.5:4b
-```
-
-Any instruction-tuned model Ollama supports will work; set `OLLAMA_MODEL` in
-`server/.env` to change it. Verify a swap against the sample emails before
-trusting it on your inbox:
+Create a free key at [Google AI Studio](https://aistudio.google.com/apikey) —
+no credit card required. Set it as `GEMINI_API_KEY` in `server/.env` (step 4).
+`GEMINI_MODEL` defaults to `gemini-2.5-flash-lite`; any Gemini model your key
+can access will work. Verify a swap against the sample emails before trusting
+it on your inbox:
 
 ```bash
 npm run test:classify --workspace server
 ```
-
-`qwen3.5:4b` scores 8/8 on those.
 
 ### 3. Create Google OAuth credentials
 
@@ -167,10 +163,10 @@ and cheap.
 alert blasts, which are high-volume and always keyword-rich. Everything else
 goes to the model.
 
-**3. Classify** (`server/src/lib/ollama.ts`). Each surviving email is sent to
-Ollama with a JSON schema, which constrains decoding so the model *cannot* emit
-malformed JSON or an invalid stage. It returns company, role, stage, confidence,
-and a one-line summary.
+**3. Classify** (`server/src/lib/gemini.ts`). Each surviving email is sent to
+the Gemini API with a JSON schema, which constrains decoding so the model
+*cannot* emit malformed JSON or an invalid stage. It returns company, role,
+stage, confidence, and a one-line summary.
 
 **4. Store.** Results are keyed on a normalised `(company, role)` pair, so
 "Acme, Inc." and "Acme" land on the same application. Each email becomes an
@@ -179,14 +175,12 @@ Older mail arriving late cannot rewrite a newer verdict.
 
 ### Speed
 
-Roughly **4-5 seconds per email** reaching the model on an M4 with `qwen3.5:4b`,
-so sync time is dominated by how many emails clear the keyword gate, not by how
-many you have. A first run over a month of mail typically takes a few minutes;
-later runs only look at what is new.
+Sync time is dominated by how many emails clear the keyword gate and Gemini's
+free-tier rate limit, not by how many you have. A first run over a month of
+mail typically takes a few minutes; later runs only look at what is new.
 
-Reasoning models are detected and their thinking is switched **off** — Qwen3.x
-otherwise spends hundreds of tokens deliberating before answering, which made
-extraction roughly 10x slower for no gain in accuracy.
+Thinking is switched **off** (`thinkingBudget: 0`) — extraction gains nothing
+from it and it costs seconds per email.
 
 ### Stages
 
@@ -262,9 +256,9 @@ in Testing status) or access was revoked. Press **Reconnect Gmail**, or run
 says; the landing page links straight to the page that fixes it. Enable it, wait
 a minute for it to propagate, then press **Retry**.
 
-**Sync says the model is not pulled** — `ollama pull qwen3.5:4b`, and check
-`ollama serve` is running. You can connect Gmail before pulling the model;
-only syncing needs it.
+**Sync says the model is unavailable** — check `GEMINI_API_KEY` is set and
+`GEMINI_MODEL` is a model your key can access. You can connect Gmail before
+this is fixed; only syncing needs it.
 
 ## Privacy
 
@@ -272,8 +266,12 @@ only syncing needs it.
 - Locally, the database stays in `server/data/tracker.db`, which is gitignored.
 - With Turso configured, email data is stored remotely. Gmail credentials are
   encrypted before storage; keep `TOKEN_ENCRYPTION_KEY` separate and secret.
-- Email bodies are truncated to 4 000 characters and sent to the configured
-  `OLLAMA_HOST` for classification.
+- Email bodies are truncated to 2,500 characters and sent to the Gemini API
+  for classification — this happens whether you run locally or on Render.
+  Google's free-tier terms permit using this content to improve its products;
+  see [Google's Gemini API terms](https://ai.google.dev/gemini-api/terms) if
+  that matters to you, or switch to a paid Gemini key for a no-training
+  guarantee.
 - To revoke access entirely: **Setup → Disconnect**, then remove the app at
   [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
 

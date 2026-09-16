@@ -71,15 +71,15 @@ export function SettingsPanel({ health, healthError, onSaved }: Props) {
         </p>
       )}
 
-      {health && !health.ollama.reachable && (
+      {health && !health.gemini.reachable && (
         <p className="notice notice-bad">
-          Ollama endpoint is not responding. Check <code>OLLAMA_HOST</code>.
+          Gemini API is not responding. Check <code>GEMINI_API_KEY</code>.
         </p>
       )}
 
-      {health && health.ollama.reachable && !health.ollama.modelAvailable && (
+      {health && health.gemini.reachable && !health.gemini.modelAvailable && (
         <p className="notice notice-bad">
-          Configured model unavailable. Check <code>OLLAMA_MODEL</code> on the model host.
+          Configured model unavailable. Check <code>GEMINI_MODEL</code>.
         </p>
       )}
 

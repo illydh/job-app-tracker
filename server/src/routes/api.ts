@@ -22,7 +22,7 @@ import {
   saveToken,
   type GmailProfile,
 } from "../lib/gmail.ts";
-import { health as ollamaHealth } from "../lib/ollama.ts";
+import { health as geminiHealth } from "../lib/gemini.ts";
 import { authRequired, isValidToken, issueToken } from "../lib/session.ts";
 import { findDuplicates } from "../lib/similarity.ts";
 import { daysSince, deriveStage } from "../lib/stage.ts";
@@ -157,7 +157,7 @@ api.get(
     const [lastSync, profile, model, databaseStats] = await Promise.all([
       store.getMeta("last_sync_at"),
       resolveProfile(),
-      ollamaHealth(),
+      geminiHealth(),
       store.stats(),
     ]);
     const authProblem = gmailAuthError();
@@ -173,7 +173,7 @@ api.get(
         profile,
         syncSince: config.syncSince,
       },
-      ollama: model,
+      gemini: model,
       stats: databaseStats,
       lastSyncAt: lastSync ? Number(lastSync) : null,
       syncing: isSyncing(),
